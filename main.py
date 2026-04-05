@@ -8,10 +8,10 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
-from .core.data import ScheduleDataManager
-from .core.generator import SchedulerGenerator
-from .core.schedule import LifeScheduler
-from .core.utils import time_desc
+from .data import ScheduleDataManager
+from .generator import SchedulerGenerator
+from .schedule import LifeScheduler
+from .utils import time_desc
 
 
 class LifeSchedulerPlugin(Star):
