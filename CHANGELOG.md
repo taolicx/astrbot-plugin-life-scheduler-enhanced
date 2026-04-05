@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.3.1
+
+- 新增根目录兼容模块 `data.py`、`generator.py`、`schedule.py`、`utils.py`
+- 将 `main.py` 改为优先从根目录模块导入，避免 GitHub 安装流程对子目录处理不完整时出现 `core` 模块导入失败
+
 ## v2.3.0
 
 - 调整插件公开信息，统一为增强版仓库信息
