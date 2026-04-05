@@ -1,8 +1,9 @@
 # Changelog
 
-## v2.2.7 - 2026-02-23
-- 修复：LLM 返回空 completion 时增加一次重试，并在失败时给出明确错误 `API返回的completion为空`。
-- 增强：统一 completion 抽取字段（`completion_text/completion/text/content`）。
+## v2.3.0
 
-## v2.2.6
-- 历史版本（详见 git 历史）。
+- 调整插件公开信息，统一为增强版仓库信息
+- 更新作者与仓库链接
+- 清理原公开群号和二维码信息
+- 扩充并优化创意池内容
+- 保持原有生活日程生成机制不变
