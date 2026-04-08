@@ -5,6 +5,7 @@ from astrbot.api import logger
 from astrbot.api.all import Context, Star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.message.components import Plain
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
@@ -12,6 +13,17 @@ from .data import ScheduleDataManager
 from .generator import SchedulerGenerator
 from .schedule import LifeScheduler
 from .utils import time_desc
+
+_GENERIC_AGENT_REPLY_PATTERNS = (
+    re.compile(
+        r"^\s*i(?:'m| am)\s+ready\s+to\s+help.*?available\s+tools.*$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"^\s*我已准备好帮助完成任务.*?(?:取得进展的可用工具|available tools).*$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
 
 
 class LifeSchedulerPlugin(Star):
@@ -60,6 +72,45 @@ class LifeSchedulerPlugin(Star):
 
         req.system_prompt += inject_text
         logger.debug(f"[LLM] 添加的内在状态注入：{inject_text}")
+
+    @filter.on_decorating_result()
+    async def on_decorating_result(self, event: AstrMessageEvent):
+        """普通聊天结果发出前清洗通用代理占位废话。"""
+        result = event.get_result()
+        if result is None or not result.chain or not result.is_model_result():
+            return
+
+        changed = False
+        for comp in result.chain:
+            if not isinstance(comp, Plain):
+                continue
+            sanitized = self._sanitize_generic_agent_reply(comp.text)
+            if sanitized != comp.text:
+                comp.text = sanitized
+                changed = True
+
+        if changed:
+            logger.warning("已清洗模型通用代理占位回复")
+
+    def _sanitize_generic_agent_reply(self, text: str) -> str:
+        raw = text or ""
+        compact = re.sub(r"\s+", " ", raw).strip()
+        if not compact:
+            return raw
+
+        for pattern in _GENERIC_AGENT_REPLY_PATTERNS:
+            if pattern.match(compact):
+                return "刚刚模型回复异常，请把上一句再发一次。"
+
+        for marker in ("I'm ready to help", "I am ready to help", "我已准备好帮助完成任务"):
+            if compact.startswith(marker):
+                parts = re.split(r"[。.!！？\n]+", compact, maxsplit=1)
+                if len(parts) > 1 and parts[1].strip():
+                    remainder = parts[1].strip(" ，。；;:：")
+                    return remainder or "刚刚模型回复异常，请把上一句再发一次。"
+                return "刚刚模型回复异常，请把上一句再发一次。"
+
+        return raw
 
     @filter.command("查看日程", alias={"life show"})
     async def life_show(self, event: AstrMessageEvent):
