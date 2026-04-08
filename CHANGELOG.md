@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.3.5
+
+- 进一步放宽 Claude 等模型的结构化解析，兼容 Markdown 标题、加粗标签、列表标签、`今日穿搭/今日计划` 等字段写法
+- 支持从嵌套 JSON 对象中提取 `outfit_style/outfit/schedule`，减少模型包一层 `data/result` 时的解析失败
+- 即使上游模型输出仍不合规，也会统一回退成一份本地可用日程，不再返回 `status=failed`
+- 放松风格校验：缺少 `outfit_style` 或 `outfit` 首行缺少 `风格：...` 前缀时，会自动补齐而不是直接判失败
+
 ## v2.3.4
 
 - 新增普通聊天结果发出前清洗逻辑，拦截“I am ready to help ... available tools”这类通用代理占位废话
