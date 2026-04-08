@@ -46,6 +46,14 @@ _SEGMENT_KEYS = (
 )
 
 
+def compat_dataclass(*args, **kwargs):
+    """兼容较老本机 Python，对 slots 形参做降级处理。"""
+    if sys.version_info < (3, 10):
+        kwargs = dict(kwargs)
+        kwargs.pop("slots", None)
+    return dataclass(*args, **kwargs)
+
+
 @compat_dataclass(slots=True)
 class ScheduleContext:
     date_str: str
@@ -740,4 +748,3 @@ def compat_dataclass(*args, **kwargs):
         kwargs = dict(kwargs)
         kwargs.pop("slots", None)
     return dataclass(*args, **kwargs)
-
