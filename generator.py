@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import ast
 import asyncio
 import datetime
 import json
 import random
 import re
+import sys
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -15,7 +18,7 @@ from .data import (
     ScheduleData,
     ScheduleDataManager,
     ScheduleSegment,
-    build_default_segments,
+    build_detailed_segments,
     build_segment_slots,
     normalize_clock_text,
     resolve_cycle_anchor,
@@ -43,7 +46,7 @@ _SEGMENT_KEYS = (
 )
 
 
-@dataclass(slots=True)
+@compat_dataclass(slots=True)
 class ScheduleContext:
     date_str: str
     weekday: str
@@ -334,6 +337,14 @@ class SchedulerGenerator:
         )
         if extra:
             prompt += f"\n\n【用户补充要求】\n{extra}"
+        prompt += (
+            "\n## 追加细化约束\n"
+            "- 每个 segment 必须继续细化到 outfit_top、outfit_bottom、outfit_outerwear、outfit_shoes、outfit_accessories、hairstyle、makeup、selfie_pose、selfie_lighting。\n"
+            "- outfit 要写成一整句完整穿搭总结，其余字段用于拆分细节，不能留空，也不能所有时段都写成同一套衣服。\n"
+            "- wake_up 要偏居家起床状态；morning_outing 要像正式出门；daytime_work 要像白天主线外出；after_work 要像下班返程；home_evening 要换成到家后更舒服的状态；late_night 要进入睡前收尾状态。\n"
+            "- 自拍相关字段必须是参考图改图可直接使用的描述，要贴合当前时段，不要写成泛泛的文生图套话。\n"
+            '- 你的最终 JSON 中，每个 segment 至少必须含有：outfit、outfit_top、outfit_bottom、outfit_outerwear、outfit_shoes、outfit_accessories、hairstyle、makeup、activity、location、mood、selfie_scene、selfie_pose、selfie_lighting、selfie_prompt_hint、caption_hint。\n'
+        )
         return prompt
 
     async def _call_llm(self, prompt: str, *, sid: str = "life_scheduler_gen") -> str:
@@ -605,7 +616,7 @@ class SchedulerGenerator:
         summary_outfit: str,
         summary_schedule: str,
     ) -> list[ScheduleSegment]:
-        default_segments = build_default_segments(
+        default_segments = build_detailed_segments(
             anchor_dt=anchor_dt,
             outfit_style=outfit_style,
             summary_outfit=summary_outfit,
@@ -638,10 +649,19 @@ class SchedulerGenerator:
                     start_time=slot.get("start_time", default.start_time),
                     end_time=slot.get("end_time", default.end_time),
                     outfit=str(raw.get("outfit") or default.outfit).strip(),
+                    outfit_top=str(raw.get("outfit_top") or default.outfit_top).strip(),
+                    outfit_bottom=str(raw.get("outfit_bottom") or default.outfit_bottom).strip(),
+                    outfit_outerwear=str(raw.get("outfit_outerwear") or default.outfit_outerwear).strip(),
+                    outfit_shoes=str(raw.get("outfit_shoes") or default.outfit_shoes).strip(),
+                    outfit_accessories=str(raw.get("outfit_accessories") or default.outfit_accessories).strip(),
+                    hairstyle=str(raw.get("hairstyle") or default.hairstyle).strip(),
+                    makeup=str(raw.get("makeup") or default.makeup).strip(),
                     activity=str(raw.get("activity") or raw.get("schedule") or default.activity).strip(),
                     location=str(raw.get("location") or default.location).strip(),
                     mood=str(raw.get("mood") or default.mood).strip(),
                     selfie_scene=str(raw.get("selfie_scene") or default.selfie_scene).strip(),
+                    selfie_pose=str(raw.get("selfie_pose") or default.selfie_pose).strip(),
+                    selfie_lighting=str(raw.get("selfie_lighting") or default.selfie_lighting).strip(),
                     selfie_prompt_hint=str(raw.get("selfie_prompt_hint") or default.selfie_prompt_hint).strip(),
                     caption_hint=str(raw.get("caption_hint") or default.caption_hint).strip(),
                 )
@@ -695,7 +715,7 @@ class SchedulerGenerator:
         )
         if extra:
             summary_schedule += f" 额外要求会体现在当天安排里：{extra}"
-        segments = build_default_segments(
+        segments = build_detailed_segments(
             anchor_dt=anchor_dt,
             outfit_style=outfit_style,
             summary_outfit=summary_outfit,
@@ -714,3 +734,10 @@ class SchedulerGenerator:
             segments=segments,
             status="ok",
         )
+def compat_dataclass(*args, **kwargs):
+    """兼容较老本机 Python，对 slots 形参做降级处理。"""
+    if sys.version_info < (3, 10):
+        kwargs = dict(kwargs)
+        kwargs.pop("slots", None)
+    return dataclass(*args, **kwargs)
+

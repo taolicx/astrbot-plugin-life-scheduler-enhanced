@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import zoneinfo
 from collections.abc import Awaitable, Callable
 

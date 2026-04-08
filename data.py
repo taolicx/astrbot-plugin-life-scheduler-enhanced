@@ -1,8 +1,19 @@
+from __future__ import annotations
+
 import datetime
 import json
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Tuple, Union
+
+
+def compat_dataclass(*args, **kwargs):
+    """兼容较老本机 Python，对 slots 形参做降级处理。"""
+    if sys.version_info < (3, 10):
+        kwargs = dict(kwargs)
+        kwargs.pop("slots", None)
+    return dataclass(*args, **kwargs)
 
 ScheduleStatus = Literal["ok", "failed"]
 
@@ -95,17 +106,32 @@ def resolve_clock_in_window(
     return candidate
 
 
-@dataclass(slots=True)
+def _join_nonempty(parts: list[str]) -> str:
+    return "，".join(
+        [part.strip() for part in parts if isinstance(part, str) and part.strip()]
+    )
+
+
+@compat_dataclass(slots=True)
 class ScheduleSegment:
     key: str
     label: str = ""
     start_time: str = ""
     end_time: str = ""
     outfit: str = ""
+    outfit_top: str = ""
+    outfit_bottom: str = ""
+    outfit_outerwear: str = ""
+    outfit_shoes: str = ""
+    outfit_accessories: str = ""
+    hairstyle: str = ""
+    makeup: str = ""
     activity: str = ""
     location: str = ""
     mood: str = ""
     selfie_scene: str = ""
+    selfie_pose: str = ""
+    selfie_lighting: str = ""
     selfie_prompt_hint: str = ""
     caption_hint: str = ""
 
@@ -117,10 +143,19 @@ class ScheduleSegment:
             start_time=str(data.get("start_time") or "").strip(),
             end_time=str(data.get("end_time") or "").strip(),
             outfit=str(data.get("outfit") or "").strip(),
+            outfit_top=str(data.get("outfit_top") or "").strip(),
+            outfit_bottom=str(data.get("outfit_bottom") or "").strip(),
+            outfit_outerwear=str(data.get("outfit_outerwear") or "").strip(),
+            outfit_shoes=str(data.get("outfit_shoes") or "").strip(),
+            outfit_accessories=str(data.get("outfit_accessories") or "").strip(),
+            hairstyle=str(data.get("hairstyle") or "").strip(),
+            makeup=str(data.get("makeup") or "").strip(),
             activity=str(data.get("activity") or "").strip(),
             location=str(data.get("location") or "").strip(),
             mood=str(data.get("mood") or "").strip(),
             selfie_scene=str(data.get("selfie_scene") or "").strip(),
+            selfie_pose=str(data.get("selfie_pose") or "").strip(),
+            selfie_lighting=str(data.get("selfie_lighting") or "").strip(),
             selfie_prompt_hint=str(data.get("selfie_prompt_hint") or "").strip(),
             caption_hint=str(data.get("caption_hint") or "").strip(),
         )
@@ -131,6 +166,30 @@ class ScheduleSegment:
         if end_dt <= start_dt:
             end_dt += datetime.timedelta(days=1)
         return start_dt <= moment < end_dt
+
+    def outfit_detail_text(self) -> str:
+        detailed = _join_nonempty(
+            [
+                f"上装{self.outfit_top}" if self.outfit_top else "",
+                f"下装{self.outfit_bottom}" if self.outfit_bottom else "",
+                f"外搭{self.outfit_outerwear}" if self.outfit_outerwear else "",
+                f"鞋履{self.outfit_shoes}" if self.outfit_shoes else "",
+                f"配饰{self.outfit_accessories}" if self.outfit_accessories else "",
+            ]
+        )
+        if self.outfit and detailed:
+            return f"{self.outfit}；细节包括{detailed}"
+        return self.outfit or detailed
+
+    def selfie_visual_text(self) -> str:
+        return _join_nonempty(
+            [
+                f"发型{self.hairstyle}" if self.hairstyle else "",
+                f"妆面{self.makeup}" if self.makeup else "",
+                f"姿态{self.selfie_pose}" if self.selfie_pose else "",
+                f"光线{self.selfie_lighting}" if self.selfie_lighting else "",
+            ]
+        )
 
 
 def build_default_segments(
@@ -212,7 +271,212 @@ def build_default_segments(
     return segments
 
 
-@dataclass(slots=True)
+def build_detailed_segments(
+    *,
+    anchor_dt: datetime.datetime,
+    outfit_style: str,
+    summary_outfit: str,
+    summary_schedule: str,
+) -> list[ScheduleSegment]:
+    segments = build_default_segments(
+        anchor_dt=anchor_dt,
+        outfit_style=outfit_style,
+        summary_outfit=summary_outfit,
+        summary_schedule=summary_schedule,
+    )
+    detail_map: dict[str, dict[str, str]] = {
+        "wake_up": {
+            "outfit": f"{outfit_style} 的晨起居家穿搭，柔软、轻松，像刚洗漱完后的自然状态。",
+            "outfit_top": "柔软棉质家居上衣或宽松短T",
+            "outfit_bottom": "家居短裤或宽松长裤",
+            "outfit_outerwear": "薄开衫、针织披肩或不额外加外套",
+            "outfit_shoes": "软底拖鞋",
+            "outfit_accessories": "发圈、细耳钉或素色手机壳",
+            "hairstyle": "自然披发、低丸子头或低马尾",
+            "makeup": "近素颜或只有轻薄底妆和淡唇色",
+            "activity": "起床后在家慢慢清醒，洗漱、整理房间、换上第一套舒适衣服。",
+            "location": "卧室、洗漱台、窗边或家里镜前",
+            "mood": "安静、清醒、还带一点刚醒来的松弛感",
+            "selfie_scene": "刚洗漱完或整理好头发后，在家里随手自拍一张。",
+            "selfie_pose": "单手举手机，对镜或半侧身站在窗边",
+            "selfie_lighting": "晨间自然窗光，柔和偏亮",
+            "selfie_prompt_hint": "保留晨起后的居家感和轻微松弛感，不要做成精修棚拍。",
+            "caption_hint": "像刚起床整理好自己后，安静记录一下今天的开场。",
+        },
+        "morning_outing": {
+            "outfit": f"{outfit_style} 的正式出门穿搭，适合通勤、上班或上午外出。",
+            "outfit_top": "衬衫、修身针织上衣或利落打底",
+            "outfit_bottom": "直筒裤、半裙或干净利落的通勤下装",
+            "outfit_outerwear": "轻薄西装、短外套或风衣",
+            "outfit_shoes": "乐福鞋、低跟鞋或干净运动鞋",
+            "outfit_accessories": "通勤包、腕表、细项链或工牌",
+            "hairstyle": "整理过的低马尾、披发或半扎发",
+            "makeup": "完整通勤淡妆，气色干净",
+            "activity": "准备出门，切换到工作或办事节奏，赶在上午把状态提起来。",
+            "location": "玄关、电梯口、楼下或通勤路上",
+            "mood": "清醒、利落、带一点赶时间的干脆",
+            "selfie_scene": "出门前对镜或通勤途中顺手拍一张，重点是完整穿搭。",
+            "selfie_pose": "拎包站姿、肩侧构图或边走边回头看镜头",
+            "selfie_lighting": "早晨偏亮自然光，户外或走廊光线",
+            "selfie_prompt_hint": "突出上班前的完整穿搭和出门状态，像真的在玄关或路上顺手自拍。",
+            "caption_hint": "像出门前顺手留一张，整个人已经进入白天节奏。",
+        },
+        "daytime_work": {
+            "outfit": f"{outfit_style} 的白天主线穿搭，完整、利落，是今天最稳定的一套外出状态。",
+            "outfit_top": "挺括衬衫、修身上衣或有质感的内搭",
+            "outfit_bottom": "干净利落的裤装或裙装",
+            "outfit_outerwear": "西装外套、针织外搭或轻风衣",
+            "outfit_shoes": "适合久站行走的鞋履",
+            "outfit_accessories": "腕表、包、耳饰或简单戒指",
+            "hairstyle": "白天维持整洁的发型，发丝收拾得干净",
+            "makeup": "完整且稳定的白天妆面",
+            "activity": "白天以工作、学习、见人、沟通和处理事务为主，节奏持续在线。",
+            "location": "工位、会议室、学校、自习区或白天外出场所",
+            "mood": "专注、稳定、清醒但不紧绷",
+            "selfie_scene": "白天忙里偷闲记录一下状态，像在工位、洗手间镜子或咖啡间顺手拍的自拍。",
+            "selfie_pose": "半身镜前自拍、坐姿举手机或靠墙侧拍",
+            "selfie_lighting": "室内均匀白光或窗边自然光",
+            "selfie_prompt_hint": "保留白天工作中的完整穿搭和清醒状态，画面要像忙里偷闲拍一张。",
+            "caption_hint": "像白天忙里偷闲拍一张，顺手记一下今天的状态。",
+        },
+        "after_work": {
+            "outfit": f"{outfit_style} 的下班返程穿搭，还是白天那套主线，但状态更松一点。",
+            "outfit_top": "白天主线内搭保持不变，领口或袖口略微放松",
+            "outfit_bottom": "维持白天下装",
+            "outfit_outerwear": "外套敞开穿、半披着或直接搭在手臂上",
+            "outfit_shoes": "仍是白天鞋履，但呈现一点走了一天后的真实感",
+            "outfit_accessories": "肩背包、手拿咖啡或下班路上的小物",
+            "hairstyle": "发型略有松动，但整体还整洁",
+            "makeup": "妆面保持着，但比早上更自然",
+            "activity": "结束白天事务，开始回程、顺路买东西或转入晚间安排。",
+            "location": "地铁、电梯、街边、车里或傍晚街头",
+            "mood": "放松下来，带一点疲惫和收工感",
+            "selfie_scene": "下班后在返程路上、商场玻璃前或电梯里随手拍一张。",
+            "selfie_pose": "单手拿手机、另一手拎包或扶电梯镜面侧拍",
+            "selfie_lighting": "傍晚街灯、商场灯光或车内柔和光线",
+            "selfie_prompt_hint": "强化下班后的松一口气和傍晚生活感，穿搭仍然是白天那套，但状态更放松。",
+            "caption_hint": "像下班返程时顺手拍的一张，带一点收工后的轻松。",
+        },
+        "home_evening": {
+            "outfit": f"{outfit_style} 的到家后放松穿搭，明显比白天更舒服、更居家。",
+            "outfit_top": "宽松家居上衣、柔软针织或舒适T恤",
+            "outfit_bottom": "运动短裤、针织长裤或家居裙",
+            "outfit_outerwear": "薄针织开衫、家居外披或不再加外套",
+            "outfit_shoes": "拖鞋或赤脚在家",
+            "outfit_accessories": "居家发夹、简细首饰或不刻意戴配饰",
+            "hairstyle": "回家后松开的头发、鲨鱼夹盘发或低丸子头",
+            "makeup": "妆面减淡，像回家后稍微卸掉一点疲惫感",
+            "activity": "回到家后吃饭、洗漱、整理东西、做自己的晚间安排。",
+            "location": "客厅、厨房、卧室或镜前",
+            "mood": "舒缓、温和、终于彻底放松",
+            "selfie_scene": "晚饭后、洗完澡前后或在家换完衣服后随手自拍。",
+            "selfie_pose": "坐在沙发边、镜前站姿或半躺着举手机",
+            "selfie_lighting": "室内暖光或夜间台灯光，偏柔和",
+            "selfie_prompt_hint": "突出回家后的舒适感和松弛感，穿搭明显从外出切到居家。",
+            "caption_hint": "像晚上回到家终于慢下来，随手记录一下当下的状态。",
+        },
+        "late_night": {
+            "outfit": f"{outfit_style} 的夜间收尾穿搭，进入睡前状态，更轻、更软、更安静。",
+            "outfit_top": "柔软睡衣上衣、吊带外搭薄衫或宽松棉T",
+            "outfit_bottom": "睡裤、家居短裤或轻薄长裙",
+            "outfit_outerwear": "薄披肩或不再额外加外搭",
+            "outfit_shoes": "拖鞋或不穿鞋",
+            "outfit_accessories": "细发圈、发夹或几乎无配饰",
+            "hairstyle": "松散长发、睡前低辫或简单夹起",
+            "makeup": "淡到几乎看不出，只保留自然气色",
+            "activity": "夜里把白天彻底收尾，准备休息，或安静做一点自己的事再睡。",
+            "location": "卧室、床边、窗帘旁或夜间镜前",
+            "mood": "安静、慵懒、带一点睡前的私密感",
+            "selfie_scene": "睡前在房间里安静地举手机自拍一张，像记录今天的尾声。",
+            "selfie_pose": "靠床坐着、镜前低角度自拍或半侧脸看向镜头",
+            "selfie_lighting": "夜间暖色台灯或昏柔室内光",
+            "selfie_prompt_hint": "保持夜间安静氛围和睡前松弛感，画面柔和、真实，不要过度修饰。",
+            "caption_hint": "像睡前想留一张今天最后的状态，语气更安静一点。",
+        },
+    }
+
+    enriched: list[ScheduleSegment] = []
+    for segment in segments:
+        detail = detail_map.get(segment.key, {})
+        base_outfit = str(detail.get("outfit") or segment.outfit or summary_outfit).strip()
+        enriched.append(
+            ScheduleSegment(
+                key=segment.key,
+                label=segment.label,
+                start_time=segment.start_time,
+                end_time=segment.end_time,
+                outfit=base_outfit,
+                outfit_top=str(detail.get("outfit_top") or "").strip(),
+                outfit_bottom=str(detail.get("outfit_bottom") or "").strip(),
+                outfit_outerwear=str(detail.get("outfit_outerwear") or "").strip(),
+                outfit_shoes=str(detail.get("outfit_shoes") or "").strip(),
+                outfit_accessories=str(detail.get("outfit_accessories") or "").strip(),
+                hairstyle=str(detail.get("hairstyle") or "").strip(),
+                makeup=str(detail.get("makeup") or "").strip(),
+                activity=str(detail.get("activity") or segment.activity or summary_schedule).strip(),
+                location=str(detail.get("location") or segment.location).strip(),
+                mood=str(detail.get("mood") or segment.mood).strip(),
+                selfie_scene=str(detail.get("selfie_scene") or segment.selfie_scene).strip(),
+                selfie_pose=str(detail.get("selfie_pose") or "").strip(),
+                selfie_lighting=str(detail.get("selfie_lighting") or "").strip(),
+                selfie_prompt_hint=str(detail.get("selfie_prompt_hint") or segment.selfie_prompt_hint).strip(),
+                caption_hint=str(detail.get("caption_hint") or segment.caption_hint).strip(),
+            )
+        )
+    return enriched
+
+
+def hydrate_segments_with_defaults(
+    *,
+    anchor_dt: datetime.datetime,
+    outfit_style: str,
+    summary_outfit: str,
+    summary_schedule: str,
+    segments: list[ScheduleSegment],
+) -> list[ScheduleSegment]:
+    default_map = {
+        segment.key: segment
+        for segment in build_detailed_segments(
+            anchor_dt=anchor_dt,
+            outfit_style=outfit_style,
+            summary_outfit=summary_outfit,
+            summary_schedule=summary_schedule,
+        )
+    }
+    hydrated: list[ScheduleSegment] = []
+    for segment in segments:
+        default = default_map.get(segment.key)
+        if default is None:
+            hydrated.append(segment)
+            continue
+        hydrated.append(
+            ScheduleSegment(
+                key=segment.key,
+                label=segment.label or default.label,
+                start_time=segment.start_time or default.start_time,
+                end_time=segment.end_time or default.end_time,
+                outfit=segment.outfit or default.outfit,
+                outfit_top=segment.outfit_top or default.outfit_top,
+                outfit_bottom=segment.outfit_bottom or default.outfit_bottom,
+                outfit_outerwear=segment.outfit_outerwear or default.outfit_outerwear,
+                outfit_shoes=segment.outfit_shoes or default.outfit_shoes,
+                outfit_accessories=segment.outfit_accessories or default.outfit_accessories,
+                hairstyle=segment.hairstyle or default.hairstyle,
+                makeup=segment.makeup or default.makeup,
+                activity=segment.activity or default.activity,
+                location=segment.location or default.location,
+                mood=segment.mood or default.mood,
+                selfie_scene=segment.selfie_scene or default.selfie_scene,
+                selfie_pose=segment.selfie_pose or default.selfie_pose,
+                selfie_lighting=segment.selfie_lighting or default.selfie_lighting,
+                selfie_prompt_hint=segment.selfie_prompt_hint or default.selfie_prompt_hint,
+                caption_hint=segment.caption_hint or default.caption_hint,
+            )
+        )
+    return hydrated
+
+
+@compat_dataclass(slots=True)
 class ScheduleData:
     date: str
     anchor_time: str = "07:00"
@@ -278,12 +542,23 @@ class ScheduleData:
             self.outfit = self.summary_outfit
         if not self.schedule:
             self.schedule = self.summary_schedule
+        default_outfit_style = self.outfit_style or "自然日常风"
+        default_summary_outfit = self.summary_outfit or self.outfit or "自然舒服的日常穿搭"
+        default_summary_schedule = self.summary_schedule or self.schedule or "按自己的节奏安排一天"
         if not self.segments:
-            self.segments = build_default_segments(
+            self.segments = build_detailed_segments(
                 anchor_dt=anchor_dt,
                 outfit_style=self.outfit_style or "自然日常风",
                 summary_outfit=self.summary_outfit or self.outfit or "自然舒服的日常穿搭",
                 summary_schedule=self.summary_schedule or self.schedule or "按自己的节奏安排一天",
+            )
+        else:
+            self.segments = hydrate_segments_with_defaults(
+                anchor_dt=anchor_dt,
+                outfit_style=default_outfit_style,
+                summary_outfit=default_summary_outfit,
+                summary_schedule=default_summary_schedule,
+                segments=self.segments,
             )
         return self
 
