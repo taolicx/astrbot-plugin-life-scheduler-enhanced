@@ -37,19 +37,20 @@ class LifeScheduler:
 
     def start(self):
         try:
-            schedule_time = self.config["schedule_time"]
-            hour, minute = map(int, schedule_time.split(":"))
+            schedule_time = str(self.config["schedule_time"] or "07:00")
+            hour, minute, second = self._parse_schedule_time(schedule_time)
             self.job = self.scheduler.add_job(
                 self.task,
                 "cron",
                 hour=hour,
                 minute=minute,
+                second=second,
                 id="daily_schedule_gen",
             )
             self.scheduler.start()
-            logger.info(f"生活调度器已启动，时间：{schedule_time}")
-        except Exception as e:
-            logger.error(f"调度器初始化失败：{e}")
+            logger.info("生活调度器已启动，时间：%s", schedule_time)
+        except Exception as exc:
+            logger.error("调度器初始化失败：%s", exc)
 
     def stop(self):
         if self.scheduler.running:
@@ -60,11 +61,30 @@ class LifeScheduler:
             return
 
         try:
-            hour, minute = map(int, new_time.split(":"))
+            hour, minute, second = self._parse_schedule_time(new_time)
             self.config["schedule_time"] = new_time
             self.config.save_config()
             if self.job:
-                self.job.reschedule("cron", hour=hour, minute=minute)
-                logger.info(f"生活调度器已重新排程至 {hour}:{minute}")
-        except Exception as e:
-            logger.error(f"更新调度器失败：{e}")
+                self.job.reschedule("cron", hour=hour, minute=minute, second=second)
+                logger.info(
+                    "生活调度器已重新排程至 %02d:%02d:%02d",
+                    hour,
+                    minute,
+                    second,
+                )
+        except Exception as exc:
+            logger.error("更新调度器失败：%s", exc)
+
+    @staticmethod
+    def _parse_schedule_time(value: str) -> tuple[int, int, int]:
+        parts = [part.strip() for part in str(value or "").split(":")]
+        if len(parts) == 2:
+            hour, minute = map(int, parts)
+            second = 0
+        elif len(parts) == 3:
+            hour, minute, second = map(int, parts)
+        else:
+            raise ValueError("时间格式必须是 HH:MM 或 HH:MM:SS")
+        if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+            raise ValueError("时间超出有效范围")
+        return hour, minute, second
