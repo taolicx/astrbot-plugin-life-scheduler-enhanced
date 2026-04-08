@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import ast
 import asyncio
 import datetime
 import json
 import random
 import re
 import sys
-from dataclasses import asdict, dataclass
-from typing import Any
+from dataclasses import dataclass
 
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
@@ -17,24 +15,26 @@ from astrbot.core.star.context import Context
 from .data import (
     ScheduleData,
     ScheduleDataManager,
-    ScheduleSegment,
     build_detailed_segments,
     build_segment_slots,
     normalize_clock_text,
     resolve_cycle_anchor,
 )
 
-_STYLE_PREFIX_RE = re.compile(
-    r"^\s*(?:风格|【风格】|\[风格\])\s*[:：]\s*(?P<style>.+?)(?:\n|$)"
-)
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
-_KEY_VALUE_LINE_RE = re.compile(
-    r"^\s*(outfit_style|summary_outfit|summary_schedule|outfit|schedule|穿搭风格|今日穿搭|穿搭|今日安排|日程)\s*[:：]\s*(.*)$"
-)
 _TOOL_PLACEHOLDER_RE = re.compile(
     r"(i am ready to help|i'?m ready to help|available tools|我已准备好帮助完成任务)",
     re.IGNORECASE,
 )
+_MARKDOWN_FENCE_RE = re.compile(
+    r"```(?:text|markdown|md|json)?\s*(.*?)```",
+    re.IGNORECASE | re.DOTALL,
+)
+_BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*•+]|[0-9]+[.)、])\s*")
+_LABEL_LINE_RE = re.compile(
+    r"^\s*(今日主线|日程主线|主线安排|穿搭重点|白天重点|晚间状态|夜间状态|自拍氛围|整体气质|补充细节|daily hook|outfit focus|daytime focus|evening focus|selfie tone|vibe)\s*[:：]\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+_SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n]+")
 
 _SEGMENT_KEYS = (
     "wake_up",
@@ -47,7 +47,7 @@ _SEGMENT_KEYS = (
 
 
 def compat_dataclass(*args, **kwargs):
-    """兼容较老本机 Python，对 slots 形参做降级处理。"""
+    """兼容旧版 Python，对 slots 参数做降级处理。"""
     if sys.version_info < (3, 10):
         kwargs = dict(kwargs)
         kwargs.pop("slots", None)
@@ -72,8 +72,36 @@ class ScheduleContext:
     segment_slots_text: str
 
 
+@compat_dataclass(slots=True)
+class DayGuidance:
+    daily_hook: str = ""
+    outfit_focus: str = ""
+    daytime_focus: str = ""
+    evening_focus: str = ""
+    selfie_tone: str = ""
+    vibe: str = ""
+    raw_text: str = ""
+
+    def has_content(self) -> bool:
+        return any(
+            (
+                self.daily_hook,
+                self.outfit_focus,
+                self.daytime_focus,
+                self.evening_focus,
+                self.selfie_tone,
+                self.vibe,
+            )
+        )
+
+
 class SchedulerGenerator:
-    _STYLE_ENFORCE_RETRIES = 2
+    """基于轻量文本线索生成固定窗口生活日程。
+
+    这一版不再要求模型直接返回严格 JSON，而是让模型只给出少量文本线索，
+    然后由代码本地组装全天摘要和 6 段详细时段，降低不同模型格式波动导致的整条失败。
+    """
+
     _EMPTY_COMPLETION_RETRIES = 1
 
     def __init__(
@@ -99,261 +127,250 @@ class SchedulerGenerator:
                 raise RuntimeError("schedule_generating")
             self._generating = True
 
-        data: ScheduleData | None = None
         moment = date or datetime.datetime.now()
         anchor_time = normalize_clock_text(str(self.config.get("schedule_time") or "07:00"))
         anchor_dt = resolve_cycle_anchor(moment, anchor_time)
-        anchor_key = anchor_dt.date().isoformat()
+        date_key = anchor_dt.date().isoformat()
+        logger.info("正在生成 %s 的日程...", date_key)
 
+        ctx: ScheduleContext | None = None
         try:
-            logger.info(
-                "正在生成 %s 的固定日程窗口，anchor=%s",
-                anchor_key,
-                anchor_dt.strftime("%Y-%m-%d %H:%M"),
-            )
-            ctx = await self._collect_context(moment, anchor_dt, anchor_time, umo)
-            prompt = self._build_prompt(ctx, extra)
-            sid_base = f"life_scheduler_gen_{anchor_key}"
-            content = await self._call_llm(prompt, sid=f"{sid_base}_0")
-
-            payload = self._extract_json_obj(content)
-            ok, reason = self._validate_payload(payload, ctx)
-            last_content = content
-            for attempt in range(1, self._STYLE_ENFORCE_RETRIES + 1):
-                if ok:
-                    break
-                repair_prompt = self._build_style_repair_prompt(ctx, last_content, reason)
-                last_content = await self._call_llm(repair_prompt, sid=f"{sid_base}_{attempt}")
-                payload = self._extract_json_obj(last_content)
-                ok, reason = self._validate_payload(payload, ctx)
-
-            if not ok or not payload:
-                raise ValueError(f"模型未遵循日程结构约束：{reason}")
-
-            data = self._to_schedule_data(payload, anchor_dt, ctx)
-            logger.info(
-                "固定日程生成成功: %s",
-                json.dumps(asdict(data), ensure_ascii=False, indent=2)[:1200],
-            )
-            return data
+            ctx = await self._build_context(anchor_dt, umo=umo)
+            guidance = await self._collect_guidance(anchor_dt, ctx, extra=extra)
+            if guidance.has_content():
+                data = self._build_schedule_from_guidance(
+                    anchor_dt,
+                    ctx,
+                    guidance,
+                    extra=extra,
+                )
+            else:
+                logger.warning("[LifeScheduler] 模型未提供可用线索，改用本地模板。")
+                data = self._build_local_fallback_schedule(
+                    anchor_dt,
+                    ctx,
+                    extra=extra,
+                )
         except Exception as exc:
-            logger.error("日程生成失败: %s", exc)
-            data = self._build_local_fallback_schedule(anchor_dt, ctx if "ctx" in locals() else None, extra=extra)
-            return data
+            logger.warning("[LifeScheduler] 日程生成链异常，改用本地模板：%s", exc)
+            data = self._build_local_fallback_schedule(anchor_dt, ctx, extra=extra)
         finally:
-            async with self._gen_lock:
-                self._generating = False
-            if data:
-                self.data_mgr.set(data)
+            self._generating = False
 
-    async def _collect_context(
+        self.data_mgr.set(data)
+        return data
+
+    async def _build_context(
         self,
-        moment: datetime.datetime,
         anchor_dt: datetime.datetime,
-        anchor_time: str,
-        umo: str | None,
+        *,
+        umo: str | None = None,
     ) -> ScheduleContext:
-        slots = build_segment_slots(anchor_dt)
-        slot_lines = [
+        today = anchor_dt.date()
+        diversity = self._pick_diversity(today)
+        persona_desc = await self._get_persona()
+        recent_chats = await self._get_recent_chats(umo)
+        segment_slots_text = "\n".join(
             f"- {slot['key']} | {slot['label']} | {slot['start_time']}-{slot['end_time']}"
-            for slot in slots
-        ]
+            for slot in build_segment_slots(anchor_dt)
+        )
         return ScheduleContext(
-            date_str=moment.strftime("%Y年%m月%d日"),
-            weekday=self._weekday(moment),
-            holiday=self._get_holiday_info(moment.date()),
-            persona_desc=await self._get_persona(),
-            history_schedules=self._get_history(moment.date()),
-            recent_chats=await self._get_recent_chats(umo),
-            **self._pick_diversity(moment.date()),
-            anchor_time=anchor_time,
+            date_str=anchor_dt.strftime("%Y-%m-%d"),
+            weekday=self._weekday(anchor_dt),
+            holiday=self._get_holiday_info(today),
+            persona_desc=persona_desc,
+            history_schedules=self._get_history(today),
+            recent_chats=recent_chats,
+            daily_theme=diversity["daily_theme"],
+            mood_color=diversity["mood_color"],
+            outfit_style=diversity["outfit_style"],
+            schedule_type=diversity["schedule_type"],
+            anchor_time=normalize_clock_text(str(self.config.get("schedule_time") or "07:00")),
             window_start=anchor_dt.strftime("%Y-%m-%d %H:%M"),
             window_end=(anchor_dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M"),
-            segment_slots_text="\n".join(slot_lines),
+            segment_slots_text=segment_slots_text,
         )
 
-    def _weekday(self, date: datetime.datetime) -> str:
-        return [
-            "星期一",
-            "星期二",
-            "星期三",
-            "星期四",
-            "星期五",
-            "星期六",
-            "星期日",
-        ][date.weekday()]
-
-    def _get_holiday_info(self, date: datetime.date) -> str:
-        try:
-            import holidays
-
-            cn_holidays = holidays.CN()
-            holiday_name = cn_holidays.get(date)
-            if holiday_name:
-                return f"今天是{holiday_name}"
-        except Exception:
-            return ""
-        return ""
-
-    def _pick_diversity(self, today: datetime.date) -> dict[str, str]:
-        pool = self.config["pool"]
-        return {
-            "daily_theme": random.choice(pool["daily_themes"]),
-            "mood_color": random.choice(pool["mood_colors"]),
-            "outfit_style": self._pick_outfit_style(pool["outfit_styles"], today),
-            "schedule_type": random.choice(pool["schedule_types"]),
-        }
-
-    def _pick_outfit_style(self, styles: list[str], today: datetime.date) -> str:
-        styles = list(styles or [])
-        if not styles:
-            return ""
-
-        lookback_days = int(self.config.get("reference_history_days", 0) or 0)
-        if lookback_days <= 0 or len(styles) <= 1:
-            return random.choice(styles)
-
-        used: set[str] = set()
-        for i in range(1, lookback_days + 1):
-            hist_date = today - datetime.timedelta(days=i)
-            data = self.data_mgr.get(hist_date)
-            if not data or data.status != "ok":
-                continue
-            style = (getattr(data, "outfit_style", "") or "").strip()
-            if not style:
-                style = self._extract_style_from_outfit(data.outfit)
-            if style:
-                used.add(style)
-
-        candidates = [style for style in styles if style not in used]
-        return random.choice(candidates or styles)
-
-    def _extract_style_from_outfit(self, outfit: str) -> str:
-        if not outfit:
-            return ""
-        match = _STYLE_PREFIX_RE.match(outfit.strip())
-        if not match:
-            return ""
-        return (match.group("style") or "").strip()
-
-    def _get_history(self, today: datetime.date) -> str:
-        items: list[str] = []
-        days = int(self.config.get("reference_history_days", 0) or 0)
-        if days <= 0:
-            return "（无历史记录）"
-
-        for i in range(1, days + 1):
-            hist_date = today - datetime.timedelta(days=i)
-            data = self.data_mgr.get(hist_date)
-            if not data or data.status != "ok":
-                continue
-            style = (
-                (getattr(data, "outfit_style", "") or "").strip()
-                or self._extract_style_from_outfit(data.outfit)
-            )
-            summary_outfit = (data.summary_outfit or data.outfit or "")[:60]
-            summary_schedule = (data.summary_schedule or data.schedule or "")[:80]
-            items.append(
-                f"[{hist_date.strftime('%Y-%m-%d')}] 风格：{style} 全天穿搭：{summary_outfit} 全天安排：{summary_schedule}"
-            )
-        return "\n".join(items) if items else "（无历史记录）"
-
-    async def _get_recent_chats(
+    async def _collect_guidance(
         self,
-        umo: str | None = None,
-        count: int | None = None,
-    ) -> str:
-        count = count or self.config["reference_recent_count"]
-        if not umo or not count:
-            return "无近期对话"
-
+        anchor_dt: datetime.datetime,
+        ctx: ScheduleContext,
+        *,
+        extra: str | None = None,
+    ) -> DayGuidance:
+        prompt = self._build_guidance_prompt(ctx, extra=extra)
+        session_id = f"life_scheduler_gen:{anchor_dt.date().isoformat()}"
         try:
-            cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
-            if not cid:
-                return "无最近对话记录"
-            conv = await self.context.conversation_manager.get_conversation(umo, cid)
-            if not conv or not conv.history:
-                return "无最近对话记录"
-            history = json.loads(conv.history)
-            recent = history[-count:] if count > 0 else []
-
-            formatted: list[str] = []
-            for msg in recent:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                if role == "user":
-                    formatted.append(f"用户: {content}")
-                elif role == "assistant":
-                    formatted.append(f"我: {content}")
-            return "\n".join(formatted) if formatted else "无最近对话记录"
+            text = await self._call_llm(prompt, sid=session_id)
         except Exception as exc:
-            logger.error("Failed to get recent chats for %s: %s", umo, exc)
-            return "获取对话记录失败"
+            logger.warning("[LifeScheduler] 获取日程线索失败：%s", exc)
+            return DayGuidance()
+        guidance = self._parse_guidance(text)
+        if not guidance.has_content():
+            logger.warning("[LifeScheduler] 模型返回不可解析线索，改用本地模板。")
+        return guidance
 
-    async def _get_persona(self) -> str:
-        try:
-            persona = await self.context.persona_manager.get_default_persona_v3()
-            return (
-                persona.get("prompt")
-                if isinstance(persona, dict)
-                else getattr(persona, "prompt", "")
-            )
-        except Exception:
-            return "你是一个热爱生活、情感细腻的 AI 伙伴。"
+    def _build_guidance_prompt(
+        self,
+        ctx: ScheduleContext,
+        *,
+        extra: str | None = None,
+    ) -> str:
+        extra_line = f"\n额外要求：{extra}" if extra else ""
+        return (
+            "你要为一个 Bot 生成“从刷新锚点开始算 24 小时固定不变”的生活线索。\n"
+            "不要返回 JSON，不要写解释，不要写代码块。\n"
+            "只返回下面 6 行，每行一句短句：\n"
+            "今日主线: ...\n"
+            "穿搭重点: ...\n"
+            "白天重点: ...\n"
+            "晚间状态: ...\n"
+            "自拍氛围: ...\n"
+            "整体气质: ...\n\n"
+            "要求：\n"
+            "- 内容必须贴近日常、真实、自然、能落地。\n"
+            "- 穿搭不要夸张，不要二次元，不要玄幻。\n"
+            "- 日程要像普通人一天内会发生的安排。\n"
+            "- 自拍氛围要像生活里顺手拍的照片。\n"
+            "- 不要输出英文模板，不要输出多余前言。\n\n"
+            f"日期：{ctx.date_str} {ctx.weekday}\n"
+            f"节日：{ctx.holiday or '无'}\n"
+            f"刷新锚点：{ctx.anchor_time}\n"
+            f"固定窗口：{ctx.window_start} ~ {ctx.window_end}\n"
+            f"今日主题：{ctx.daily_theme}\n"
+            f"心情色彩：{ctx.mood_color}\n"
+            f"穿搭风格：{ctx.outfit_style}\n"
+            f"日程类型：{ctx.schedule_type}\n"
+            f"时段切片：\n{ctx.segment_slots_text}\n"
+            f"近期历史：\n{ctx.history_schedules}\n"
+            f"近期对话：\n{ctx.recent_chats}\n"
+            f"人设参考：\n{ctx.persona_desc[:1200]}"
+            f"{extra_line}"
+        )
 
-    def _build_prompt(self, ctx: ScheduleContext, extra: str | None = None) -> str:
-        ctx_dict = asdict(ctx)
-        template = str(self.config["prompt_template"] or "")
-        tmpl_vars = set(re.findall(r"\{(\w+)\}", template))
-        for key in tmpl_vars - ctx_dict.keys():
-            ctx_dict[key] = ""
+    def _build_schedule_from_guidance(
+        self,
+        anchor_dt: datetime.datetime,
+        ctx: ScheduleContext,
+        guidance: DayGuidance,
+        *,
+        extra: str | None = None,
+    ) -> ScheduleData:
+        outfit_style = (ctx.outfit_style or "自然日常风").strip()
+        mood = (guidance.vibe or ctx.mood_color or "平静").strip()
+        outfit_focus = (guidance.outfit_focus or "舒适、利落、适合全天切换场景").strip()
+        daily_hook = (guidance.daily_hook or f"今天按{ctx.daily_theme}的节奏推进日常安排").strip()
+        daytime_focus = (guidance.daytime_focus or "白天把主要精力放在工作、学习或必要外出").strip()
+        evening_focus = (guidance.evening_focus or "晚间逐步收尾，回到更放松的居家状态").strip()
+        selfie_tone = (guidance.selfie_tone or "像生活里顺手拍下的自然自拍").strip()
 
-        prompt = template.format(**ctx_dict)
-        prompt += (
-            "\n\n## 24小时固定窗口\n"
-            f"- 这份日程从 {ctx.window_start} 开始生效，到 {ctx.window_end} 结束，中间 24 小时内保持同一套人物状态。\n"
-            f"- 刷新锚点时间固定为 {ctx.anchor_time}，在下一个刷新锚点到来前，不要改写当天设定。\n"
-            "- 你要给出全天摘要，以及每个时间段的细致穿搭、活动、地点、情绪和自拍线索。\n"
-            "- 不同时间段穿搭必须有层次变化：起床居家、出门工作、白天状态、下班返程、回家后、夜间休息，不能全部写成同一套衣服。\n"
-            "- 自拍线索必须贴合该时间段，而不是写成泛泛而谈的文生图描述。\n"
-            "\n## 固定时间段\n"
-            f"{ctx.segment_slots_text}\n"
-            "\n## 输出要求\n"
-            "- 只输出 JSON 对象本体，不要 Markdown，不要代码块，不要解释。\n"
-            f'- 字段 "outfit_style" 必须严格等于 "{ctx.outfit_style}"。\n'
-            '- 字段 "summary_outfit" 写全天主线穿搭概括。\n'
-            '- 字段 "summary_schedule" 写全天安排概括。\n'
-            '- 字段 "segments" 必须包含 wake_up、morning_outing、daytime_work、after_work、home_evening、late_night 六段。\n'
-            '- 每个 segment 至少包含 outfit、activity、location、mood、selfie_scene、selfie_prompt_hint、caption_hint。\n'
-            "\n## 输出示例\n"
-            "{\n"
-            f'  "outfit_style": "{ctx.outfit_style}",\n'
-            '  "summary_outfit": "风格：...\\n全天主线穿搭概括",\n'
-            '  "summary_schedule": "一句话概括今天的 24 小时状态",\n'
-            '  "segments": {\n'
-            '    "wake_up": {\n'
-            '      "outfit": "起床后在家的穿搭",\n'
-            '      "activity": "起床后的具体活动",\n'
-            '      "location": "场景地点",\n'
-            '      "mood": "情绪状态",\n'
-            '      "selfie_scene": "此时段自拍长什么样",\n'
-            '      "selfie_prompt_hint": "改图时要强调什么",\n'
-            '      "caption_hint": "此时段自拍说说应有的口吻"\n'
-            "    }\n"
-            "  }\n"
-            "}\n"
+        summary_outfit = (
+            f"{outfit_style}，重点是{outfit_focus}，整体气质保持{mood}。"
+        )
+        summary_schedule = (
+            f"{daily_hook} 白天以{daytime_focus}为主，晚上回到{evening_focus}。"
         )
         if extra:
-            prompt += f"\n\n【用户补充要求】\n{extra}"
-        prompt += (
-            "\n## 追加细化约束\n"
-            "- 每个 segment 必须继续细化到 outfit_top、outfit_bottom、outfit_outerwear、outfit_shoes、outfit_accessories、hairstyle、makeup、selfie_pose、selfie_lighting。\n"
-            "- outfit 要写成一整句完整穿搭总结，其余字段用于拆分细节，不能留空，也不能所有时段都写成同一套衣服。\n"
-            "- wake_up 要偏居家起床状态；morning_outing 要像正式出门；daytime_work 要像白天主线外出；after_work 要像下班返程；home_evening 要换成到家后更舒服的状态；late_night 要进入睡前收尾状态。\n"
-            "- 自拍相关字段必须是参考图改图可直接使用的描述，要贴合当前时段，不要写成泛泛的文生图套话。\n"
-            '- 你的最终 JSON 中，每个 segment 至少必须含有：outfit、outfit_top、outfit_bottom、outfit_outerwear、outfit_shoes、outfit_accessories、hairstyle、makeup、activity、location、mood、selfie_scene、selfie_pose、selfie_lighting、selfie_prompt_hint、caption_hint。\n'
+            summary_schedule += f" 额外要求会体现在当天安排里：{extra}。"
+
+        segments = build_detailed_segments(
+            anchor_dt=anchor_dt,
+            outfit_style=outfit_style,
+            summary_outfit=summary_outfit,
+            summary_schedule=summary_schedule,
         )
-        return prompt
+        segments = self._apply_guidance_to_segments(
+            segments,
+            guidance,
+            outfit_focus=outfit_focus,
+            mood=mood,
+            selfie_tone=selfie_tone,
+        )
+
+        return ScheduleData(
+            date=anchor_dt.date().isoformat(),
+            anchor_time=ctx.anchor_time,
+            window_start=anchor_dt.isoformat(timespec="seconds"),
+            window_end=(anchor_dt + datetime.timedelta(days=1)).isoformat(timespec="seconds"),
+            outfit_style=outfit_style,
+            outfit=summary_outfit,
+            schedule=summary_schedule,
+            summary_outfit=summary_outfit,
+            summary_schedule=summary_schedule,
+            segments=segments,
+            status="ok",
+        )
+
+    def _apply_guidance_to_segments(
+        self,
+        segments,
+        guidance: DayGuidance,
+        *,
+        outfit_focus: str,
+        mood: str,
+        selfie_tone: str,
+    ):
+        for item in segments:
+            if outfit_focus and outfit_focus not in item.outfit:
+                item.outfit = self._merge_sentence(item.outfit, f"重点是{outfit_focus}")
+            if mood:
+                item.mood = self._merge_sentence(item.mood, mood)
+                item.caption_hint = self._merge_sentence(item.caption_hint, f"语气保持{mood}")
+            if selfie_tone:
+                item.selfie_scene = self._merge_sentence(item.selfie_scene, selfie_tone)
+                item.selfie_prompt_hint = self._merge_sentence(
+                    item.selfie_prompt_hint,
+                    f"画面要像{selfie_tone}",
+                )
+
+            if item.key in {"morning_outing", "daytime_work"} and guidance.daytime_focus:
+                item.activity = self._merge_sentence(item.activity, guidance.daytime_focus)
+                item.caption_hint = self._merge_sentence(item.caption_hint, guidance.daytime_focus)
+
+            if item.key in {"after_work", "home_evening", "late_night"} and guidance.evening_focus:
+                item.activity = self._merge_sentence(item.activity, guidance.evening_focus)
+                item.caption_hint = self._merge_sentence(item.caption_hint, guidance.evening_focus)
+
+            if guidance.daily_hook and item.key == "wake_up":
+                item.activity = self._merge_sentence(item.activity, guidance.daily_hook)
+
+        return segments
+
+    def _build_local_fallback_schedule(
+        self,
+        anchor_dt: datetime.datetime,
+        ctx: ScheduleContext | None,
+        *,
+        extra: str | None = None,
+    ) -> ScheduleData:
+        safe_ctx = ctx or ScheduleContext(
+            date_str=anchor_dt.strftime("%Y-%m-%d"),
+            weekday=self._weekday(anchor_dt),
+            holiday="",
+            persona_desc="",
+            history_schedules="（无历史记录）",
+            recent_chats="（无近期对话）",
+            daily_theme="规律日常",
+            mood_color="平静",
+            outfit_style="自然日常风",
+            schedule_type="规律三餐型",
+            anchor_time=normalize_clock_text(str(self.config.get("schedule_time") or "07:00")),
+            window_start=anchor_dt.strftime("%Y-%m-%d %H:%M"),
+            window_end=(anchor_dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M"),
+            segment_slots_text="\n".join(
+                f"- {slot['key']} | {slot['label']} | {slot['start_time']}-{slot['end_time']}"
+                for slot in build_segment_slots(anchor_dt)
+            ),
+        )
+        guidance = DayGuidance(
+            daily_hook="今天按自己的节奏慢慢推进手头的事，保持真实、自然、可持续的一天。",
+            outfit_focus="穿搭以舒适、利落、方便全天切换场景为主。",
+            daytime_focus="白天把主要精力放在工作、学习或必要外出。",
+            evening_focus="晚上逐步收尾，把状态切回更放松的居家节奏。",
+            selfie_tone="像日常生活里顺手拍到的真实状态照。",
+            vibe=safe_ctx.mood_color or "平静",
+        )
+        return self._build_schedule_from_guidance(anchor_dt, safe_ctx, guidance, extra=extra)
 
     async def _call_llm(self, prompt: str, *, sid: str = "life_scheduler_gen") -> str:
         provider = self._get_provider(sid)
@@ -368,7 +385,7 @@ class SchedulerGenerator:
                 if text and not _TOOL_PLACEHOLDER_RE.search(text.strip()):
                     return text
                 if attempt < self._EMPTY_COMPLETION_RETRIES:
-                    logger.warning("LLM completion 为空或命中占位回复，准备重试一次")
+                    logger.warning("[LifeScheduler] completion 为空或命中占位回复，准备重试一次。")
             raise RuntimeError("API 返回的 completion 为空或是占位回复")
         finally:
             await self._cleanup_session(sid)
@@ -435,316 +452,225 @@ class SchedulerGenerator:
         except Exception:
             pass
 
-    def _extract_json_obj(self, text: str) -> dict[str, Any] | None:
-        candidates = self._collect_payload_candidates(text)
-        for candidate in candidates:
-            payload = self._try_parse_payload(candidate)
-            if payload:
-                return payload
-        return self._extract_key_value_payload(text)
+    def _parse_guidance(self, text: str) -> DayGuidance:
+        cleaned = self._sanitize_guidance_text(text)
+        if not cleaned or _TOOL_PLACEHOLDER_RE.search(cleaned):
+            return DayGuidance(raw_text=cleaned)
 
-    def _collect_payload_candidates(self, text: str) -> list[str]:
-        text = (text or "").strip()
-        if not text:
-            return []
-        candidates: list[str] = [text]
-        candidates.extend(match.group(1).strip() for match in _JSON_FENCE_RE.finditer(text))
-        candidates.extend(self._extract_braced_json_candidates(text))
-        seen: set[str] = set()
-        result: list[str] = []
-        for candidate in candidates:
-            normalized = candidate.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            result.append(normalized)
-        return result
+        guidance = DayGuidance(raw_text=cleaned)
+        ordered_sentences: list[str] = []
 
-    def _extract_braced_json_candidates(self, text: str) -> list[str]:
-        result: list[str] = []
-        stack = 0
-        start = -1
-        in_string = False
-        escape = False
-        for idx, ch in enumerate(text):
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-                continue
-            if ch == "{":
-                if stack == 0:
-                    start = idx
-                stack += 1
-            elif ch == "}":
-                if stack <= 0:
-                    continue
-                stack -= 1
-                if stack == 0 and start != -1:
-                    result.append(text[start : idx + 1].strip())
-                    start = -1
-        return result
-
-    def _try_parse_payload(self, candidate: str) -> dict[str, Any] | None:
-        candidate = self._normalize_json_like_text(candidate)
-        if not candidate:
-            return None
-        for loader in (json.loads, ast.literal_eval):
-            try:
-                data = loader(candidate)
-            except Exception:
-                continue
-            if isinstance(data, dict):
-                return self._coerce_payload(data)
-        return None
-
-    def _normalize_json_like_text(self, text: str) -> str:
-        text = (text or "").strip().lstrip("\ufeff")
-        replacements = {
-            "“": '"',
-            "”": '"',
-            "‘": "'",
-            "’": "'",
-            "：": ":",
-        }
-        for src, dst in replacements.items():
-            text = text.replace(src, dst)
-        text = re.sub(r",\s*([}\]])", r"\1", text)
-        return text
-
-    def _extract_key_value_payload(self, text: str) -> dict[str, Any] | None:
-        text = (text or "").strip()
-        if not text:
-            return None
-
-        data: dict[str, Any] = {}
-        current_key: str | None = None
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
+        for raw_line in cleaned.splitlines():
+            line = _BULLET_PREFIX_RE.sub("", raw_line.strip())
             if not line:
                 continue
-            match = _KEY_VALUE_LINE_RE.match(line)
+            match = _LABEL_LINE_RE.match(line)
             if match:
-                current_key = match.group(1)
-                data[current_key] = match.group(2).strip()
-                continue
-            if current_key:
-                previous = str(data.get(current_key) or "")
-                data[current_key] = (previous + "\n" + line).strip() if previous else line
-
-        if not data:
-            return None
-        return self._coerce_payload(data)
-
-    def _coerce_payload(self, data: dict[str, Any]) -> dict[str, Any]:
-        aliases = {
-            "outfit_style": ("outfit_style", "穿搭风格"),
-            "summary_outfit": ("summary_outfit", "今日穿搭", "穿搭", "outfit"),
-            "summary_schedule": ("summary_schedule", "今日安排", "日程", "schedule"),
-        }
-
-        def pick(alias_keys: tuple[str, ...]) -> str:
-            for key in alias_keys:
-                value = data.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            return ""
-
-        payload: dict[str, Any] = {
-            "outfit_style": pick(aliases["outfit_style"]),
-            "summary_outfit": pick(aliases["summary_outfit"]),
-            "summary_schedule": pick(aliases["summary_schedule"]),
-        }
-
-        segments = data.get("segments")
-        if isinstance(segments, (dict, list)):
-            payload["segments"] = segments
-        else:
-            segment_map: dict[str, Any] = {}
-            for key in _SEGMENT_KEYS:
-                value = data.get(key)
-                if isinstance(value, dict):
-                    segment_map[key] = value
-            if segment_map:
-                payload["segments"] = segment_map
-
-        return payload
-
-    def _validate_payload(
-        self,
-        payload: dict[str, Any] | None,
-        ctx: ScheduleContext,
-    ) -> tuple[bool, str]:
-        if not payload:
-            return False, "未能解析出 JSON 对象"
-
-        summary_outfit = str(payload.get("summary_outfit", "")).strip()
-        summary_schedule = str(payload.get("summary_schedule", "")).strip()
-        if not summary_outfit:
-            return False, "summary_outfit 不能为空"
-        if not summary_schedule:
-            return False, "summary_schedule 不能为空"
-
-        required = (ctx.outfit_style or "").strip()
-        if required:
-            model_style = str(payload.get("outfit_style", "")).strip()
-            if model_style != required:
-                return False, f'outfit_style 必须严格等于 "{required}"'
-
-        return True, ""
-
-    def _build_style_repair_prompt(
-        self,
-        ctx: ScheduleContext,
-        bad_text: str,
-        reason: str,
-    ) -> str:
-        return (
-            "你之前的输出没有通过校验，需要按要求重写。\n"
-            f"失败原因：{reason}\n"
-            f"必须使用的穿搭风格：{ctx.outfit_style}\n"
-            "你必须只输出一个 JSON 对象，并补齐 summary_outfit、summary_schedule、segments 六段结构。\n"
-            "不要解释，不要 Markdown，不要代码块。\n\n"
-            "你上一次的输出如下（可能不合规，仅供参考）：\n"
-            f"{bad_text}"
-        )
-
-    def _normalize_segments(
-        self,
-        payload: dict[str, Any],
-        *,
-        anchor_dt: datetime.datetime,
-        outfit_style: str,
-        summary_outfit: str,
-        summary_schedule: str,
-    ) -> list[ScheduleSegment]:
-        default_segments = build_detailed_segments(
-            anchor_dt=anchor_dt,
-            outfit_style=outfit_style,
-            summary_outfit=summary_outfit,
-            summary_schedule=summary_schedule,
-        )
-        slot_map = {item["key"]: item for item in build_segment_slots(anchor_dt)}
-        raw_segments = payload.get("segments")
-        raw_map: dict[str, Any] = {}
-
-        if isinstance(raw_segments, list):
-            for item in raw_segments:
-                if not isinstance(item, dict):
-                    continue
-                key = str(item.get("key") or "").strip()
-                if key:
-                    raw_map[key] = item
-        elif isinstance(raw_segments, dict):
-            raw_map = raw_segments
-
-        normalized: list[ScheduleSegment] = []
-        for default in default_segments:
-            slot = slot_map.get(default.key, {})
-            raw = raw_map.get(default.key)
-            if not isinstance(raw, dict):
-                raw = {}
-            normalized.append(
-                ScheduleSegment(
-                    key=default.key,
-                    label=slot.get("label", default.label),
-                    start_time=slot.get("start_time", default.start_time),
-                    end_time=slot.get("end_time", default.end_time),
-                    outfit=str(raw.get("outfit") or default.outfit).strip(),
-                    outfit_top=str(raw.get("outfit_top") or default.outfit_top).strip(),
-                    outfit_bottom=str(raw.get("outfit_bottom") or default.outfit_bottom).strip(),
-                    outfit_outerwear=str(raw.get("outfit_outerwear") or default.outfit_outerwear).strip(),
-                    outfit_shoes=str(raw.get("outfit_shoes") or default.outfit_shoes).strip(),
-                    outfit_accessories=str(raw.get("outfit_accessories") or default.outfit_accessories).strip(),
-                    hairstyle=str(raw.get("hairstyle") or default.hairstyle).strip(),
-                    makeup=str(raw.get("makeup") or default.makeup).strip(),
-                    activity=str(raw.get("activity") or raw.get("schedule") or default.activity).strip(),
-                    location=str(raw.get("location") or default.location).strip(),
-                    mood=str(raw.get("mood") or default.mood).strip(),
-                    selfie_scene=str(raw.get("selfie_scene") or default.selfie_scene).strip(),
-                    selfie_pose=str(raw.get("selfie_pose") or default.selfie_pose).strip(),
-                    selfie_lighting=str(raw.get("selfie_lighting") or default.selfie_lighting).strip(),
-                    selfie_prompt_hint=str(raw.get("selfie_prompt_hint") or default.selfie_prompt_hint).strip(),
-                    caption_hint=str(raw.get("caption_hint") or default.caption_hint).strip(),
+                self._assign_guidance_field(
+                    guidance,
+                    match.group(1).strip(),
+                    match.group(2).strip(),
                 )
+                continue
+            ordered_sentences.extend(
+                sentence.strip()
+                for sentence in _SENTENCE_SPLIT_RE.split(line)
+                if sentence.strip()
             )
-        return normalized
 
-    def _to_schedule_data(
-        self,
-        payload: dict[str, Any],
-        anchor_dt: datetime.datetime,
-        ctx: ScheduleContext,
-    ) -> ScheduleData:
-        outfit_style = str(payload.get("outfit_style") or ctx.outfit_style or "").strip()
-        summary_outfit = str(payload.get("summary_outfit") or "").strip() or f"风格：{outfit_style}\n以 {outfit_style} 为主线安排全天穿搭。"
-        summary_schedule = str(payload.get("summary_schedule") or "").strip() or "今天按自己的节奏处理工作、生活和休息。"
-        segments = self._normalize_segments(
-            payload,
-            anchor_dt=anchor_dt,
-            outfit_style=outfit_style,
-            summary_outfit=summary_outfit,
-            summary_schedule=summary_schedule,
-        )
-        return ScheduleData(
-            date=anchor_dt.date().isoformat(),
-            anchor_time=ctx.anchor_time,
-            window_start=anchor_dt.isoformat(timespec="seconds"),
-            window_end=(anchor_dt + datetime.timedelta(days=1)).isoformat(timespec="seconds"),
-            outfit_style=outfit_style,
-            outfit=summary_outfit,
-            schedule=summary_schedule,
-            summary_outfit=summary_outfit,
-            summary_schedule=summary_schedule,
-            segments=segments,
-            status="ok",
-        ).with_defaults()
+        if ordered_sentences:
+            self._fill_guidance_from_sentences(guidance, ordered_sentences)
+        return guidance
 
-    def _build_local_fallback_schedule(
+    def _sanitize_guidance_text(self, text: str) -> str:
+        text = (text or "").strip().lstrip("\ufeff")
+        if not text:
+            return ""
+        fence_match = _MARKDOWN_FENCE_RE.search(text)
+        if fence_match:
+            text = fence_match.group(1).strip()
+        return text
+
+    def _assign_guidance_field(self, guidance: DayGuidance, label: str, value: str) -> None:
+        if not value:
+            return
+        normalized = label.strip().lower()
+        mapping = {
+            "今日主线": "daily_hook",
+            "日程主线": "daily_hook",
+            "主线安排": "daily_hook",
+            "daily hook": "daily_hook",
+            "穿搭重点": "outfit_focus",
+            "outfit focus": "outfit_focus",
+            "白天重点": "daytime_focus",
+            "daytime focus": "daytime_focus",
+            "晚间状态": "evening_focus",
+            "夜间状态": "evening_focus",
+            "evening focus": "evening_focus",
+            "自拍氛围": "selfie_tone",
+            "selfie tone": "selfie_tone",
+            "整体气质": "vibe",
+            "补充细节": "vibe",
+            "vibe": "vibe",
+        }
+        attr = mapping.get(label) or mapping.get(normalized)
+        if not attr:
+            return
+        current = getattr(guidance, attr)
+        if current:
+            return
+        setattr(guidance, attr, value)
+
+    def _fill_guidance_from_sentences(
         self,
-        anchor_dt: datetime.datetime,
-        ctx: ScheduleContext | None,
-        *,
-        extra: str | None = None,
-    ) -> ScheduleData:
-        outfit_style = (ctx.outfit_style if ctx else "") or "自然日常风"
-        summary_outfit = (
-            f"风格：{outfit_style}\n"
-            f"今天以 {outfit_style} 为主线，早晚层次不同，出门阶段更完整利落，回家后换成更舒服的状态。"
+        guidance: DayGuidance,
+        sentences: list[str],
+    ) -> None:
+        ordered_fields = (
+            "daily_hook",
+            "outfit_focus",
+            "daytime_focus",
+            "evening_focus",
+            "selfie_tone",
+            "vibe",
         )
-        summary_schedule = (
-            "这一天从早上整理状态开始，白天处理工作或学习，傍晚收尾回家，晚上把节奏放慢下来。"
-        )
-        if extra:
-            summary_schedule += f" 额外要求会体现在当天安排里：{extra}"
-        segments = build_detailed_segments(
-            anchor_dt=anchor_dt,
-            outfit_style=outfit_style,
-            summary_outfit=summary_outfit,
-            summary_schedule=summary_schedule,
-        )
-        return ScheduleData(
-            date=anchor_dt.date().isoformat(),
-            anchor_time=ctx.anchor_time if ctx else normalize_clock_text(str(self.config.get("schedule_time") or "07:00")),
-            window_start=anchor_dt.isoformat(timespec="seconds"),
-            window_end=(anchor_dt + datetime.timedelta(days=1)).isoformat(timespec="seconds"),
-            outfit_style=outfit_style,
-            outfit=summary_outfit,
-            schedule=summary_schedule,
-            summary_outfit=summary_outfit,
-            summary_schedule=summary_schedule,
-            segments=segments,
-            status="ok",
-        )
-def compat_dataclass(*args, **kwargs):
-    """兼容较老本机 Python，对 slots 形参做降级处理。"""
-    if sys.version_info < (3, 10):
-        kwargs = dict(kwargs)
-        kwargs.pop("slots", None)
-    return dataclass(*args, **kwargs)
+        index = 0
+        for field in ordered_fields:
+            if getattr(guidance, field):
+                continue
+            if index >= len(sentences):
+                break
+            setattr(guidance, field, sentences[index])
+            index += 1
+
+    def _weekday(self, date: datetime.datetime) -> str:
+        return [
+            "星期一",
+            "星期二",
+            "星期三",
+            "星期四",
+            "星期五",
+            "星期六",
+            "星期日",
+        ][date.weekday()]
+
+    def _get_holiday_info(self, date: datetime.date) -> str:
+        try:
+            import holidays
+
+            cn_holidays = holidays.CN()
+            holiday_name = cn_holidays.get(date)
+            if holiday_name:
+                return f"今天是{holiday_name}"
+        except Exception:
+            return ""
+        return ""
+
+    def _pick_diversity(self, today: datetime.date) -> dict[str, str]:
+        pool = self.config["pool"]
+        return {
+            "daily_theme": random.choice(pool["daily_themes"]),
+            "mood_color": random.choice(pool["mood_colors"]),
+            "outfit_style": self._pick_outfit_style(pool["outfit_styles"], today),
+            "schedule_type": random.choice(pool["schedule_types"]),
+        }
+
+    def _pick_outfit_style(self, styles: list[str], today: datetime.date) -> str:
+        styles = list(styles or [])
+        if not styles:
+            return "自然日常风"
+
+        lookback_days = int(self.config.get("reference_history_days", 0) or 0)
+        if lookback_days <= 0 or len(styles) <= 1:
+            return random.choice(styles)
+
+        used: set[str] = set()
+        for i in range(1, lookback_days + 1):
+            hist_date = today - datetime.timedelta(days=i)
+            data = self.data_mgr.get(hist_date)
+            if not data or data.status != "ok":
+                continue
+            style = (getattr(data, "outfit_style", "") or "").strip()
+            if style:
+                used.add(style)
+
+        candidates = [style for style in styles if style not in used]
+        return random.choice(candidates or styles)
+
+    def _get_history(self, today: datetime.date) -> str:
+        items: list[str] = []
+        days = int(self.config.get("reference_history_days", 0) or 0)
+        if days <= 0:
+            return "（无历史记录）"
+
+        for i in range(1, days + 1):
+            hist_date = today - datetime.timedelta(days=i)
+            data = self.data_mgr.get(hist_date)
+            if not data or data.status != "ok":
+                continue
+            style = (getattr(data, "outfit_style", "") or "").strip()
+            summary_outfit = (data.summary_outfit or data.outfit or "")[:60]
+            summary_schedule = (data.summary_schedule or data.schedule or "")[:80]
+            items.append(
+                f"[{hist_date.strftime('%Y-%m-%d')}] 风格：{style}；穿搭：{summary_outfit}；安排：{summary_schedule}"
+            )
+        return "\n".join(items) if items else "（无历史记录）"
+
+    async def _get_recent_chats(
+        self,
+        umo: str | None = None,
+        count: int | None = None,
+    ) -> str:
+        count = count or self.config["reference_recent_count"]
+        if not umo or not count:
+            return "（无近期对话）"
+
+        try:
+            cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
+            if not cid:
+                return "（无近期对话）"
+            conv = await self.context.conversation_manager.get_conversation(umo, cid)
+            if not conv or not conv.history:
+                return "（无近期对话）"
+            history = json.loads(conv.history)
+            recent = history[-count:] if count > 0 else []
+
+            formatted: list[str] = []
+            for msg in recent:
+                role = msg.get("role", "unknown")
+                content = str(msg.get("content") or "").strip()
+                if not content:
+                    continue
+                if role == "user":
+                    formatted.append(f"用户：{content}")
+                elif role == "assistant":
+                    formatted.append(f"Bot：{content}")
+            return "\n".join(formatted) if formatted else "（无近期对话）"
+        except Exception as exc:
+            logger.error("Failed to get recent chats for %s: %s", umo, exc)
+            return "（获取对话记录失败）"
+
+    async def _get_persona(self) -> str:
+        try:
+            persona = await self.context.persona_manager.get_default_persona_v3()
+            return (
+                persona.get("prompt")
+                if isinstance(persona, dict)
+                else getattr(persona, "prompt", "")
+            )
+        except Exception:
+            return "你是一个热爱生活、情感细腻的 AI 伙伴。"
+
+    @staticmethod
+    def _merge_sentence(base: str, extra: str) -> str:
+        base = (base or "").strip()
+        extra = (extra or "").strip()
+        if not extra:
+            return base
+        if not base:
+            return extra
+        if extra in base:
+            return base
+        base = base.rstrip("。；;，, ")
+        extra = extra.rstrip("。；;，, ")
+        return f"{base}，{extra}。"
