@@ -132,6 +132,7 @@ class SchedulerGenerator:
         anchor_dt = resolve_cycle_anchor(moment, anchor_time)
         date_key = anchor_dt.date().isoformat()
         logger.info("正在生成 %s 的日程...", date_key)
+        logger.info("[LifeScheduler] schedule generation mode=no_json_guidance")
 
         ctx: ScheduleContext | None = None
         try:
