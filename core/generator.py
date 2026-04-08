@@ -295,6 +295,8 @@ class SchedulerGenerator:
         provider = self._get_provider(sid)
         if not provider:
             raise RuntimeError("No provider")
+        provider_name = self._get_provider_debug_name(provider)
+        logger.info("[LifeScheduler] generating schedule with provider=%s", provider_name)
 
         try:
             for attempt in range(self._EMPTY_COMPLETION_RETRIES + 1):
@@ -326,6 +328,14 @@ class SchedulerGenerator:
             return self.context.get_using_provider(origin)
         except TypeError:
             return self.context.get_using_provider()
+
+    @staticmethod
+    def _get_provider_debug_name(provider: object) -> str:
+        for attr in ("id", "provider_id", "model", "name"):
+            value = getattr(provider, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return provider.__class__.__name__
 
     @staticmethod
     def _extract_completion_text(resp: object) -> str:

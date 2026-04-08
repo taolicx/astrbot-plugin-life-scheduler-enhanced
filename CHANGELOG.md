@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.3.7
+
+- 修复部分 AstrBot 版本里 `metadata.config.schema` 为 list 时，动态刷新 provider 下拉会报 `'list' object has no attribute 'get'`
+- 新增日程生成时的实际 provider 日志，方便确认插件到底有没有真的走到你选的模型
+
 ## v2.3.6
 
 - 主线版本改为支持自定义选择日程生成所使用的聊天模型
