@@ -1,0 +1,29 @@
+文件作用
+- 负责把聊天模型输出转换成“固定 24 小时窗口 + 6 段分时段日程”。
+- 当前版本已经去掉“模型必须返回完整 JSON”的硬依赖。
+
+主流程
+- `generate_schedule()`
+  - 计算当前刷新锚点对应的固定窗口
+  - 读取历史、人设、近期对话和创意池
+  - 让模型只输出少量文本线索
+  - 本地组装全天摘要与 6 段 `ScheduleSegment`
+  - 保存为 `ScheduleData`
+- 如果模型返回空文本、占位废话或普通自然语言，也会回退到本地模板并返回 `status=ok`
+
+关键函数
+- `_build_guidance_prompt()`
+  - 只要求模型输出 6 行线索，不要求 JSON
+- `_parse_guidance()`
+  - 兼容“标签: 内容”和无标签短句
+- `_build_schedule_from_guidance()`
+  - 本地生成 `summary_outfit` 和 `summary_schedule`
+  - 再调用 `build_detailed_segments()` 生成 6 段细节
+- `_apply_guidance_to_segments()`
+  - 把白天重点、晚间状态和自拍氛围注入对应时段
+- `_build_local_fallback_schedule()`
+  - 模型不可用时直接生成稳定可用的本地日程
+
+排错提示
+- 如果再次看到“未能解析出 JSON 对象”，优先确认云端装的还是不是旧分支缓存。
+- 这版代码主链不应再因为 JSON 解析失败而把整条日程打成失败。
