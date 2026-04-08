@@ -17,42 +17,7 @@ _STYLE_PREFIX_RE = re.compile(
     r"^\s*(?:风格|【风格】|\[风格\])\s*[:：]\s*(?P<style>.+?)(?:\n|$)"
 )
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
-_KEY_VALUE_LINE_RE = re.compile(
-    r"^\s*(?:[-*•]\s*)?(?:\*\*|__)?(outfit_style|outfit|schedule|style|穿搭风格|风格|穿搭|今日穿搭|穿搭建议|日程|安排|今日安排|今日行程|今日计划|行程|计划)(?:\*\*|__)?\s*[:：]\s*(.*)$"
-)
-_SECTION_HEADING_RE = re.compile(
-    r"^\s*(?:[#>]+\s*|[-*•]\s*)?(?:\*\*|__)?(outfit_style|outfit|schedule|style|穿搭风格|风格|穿搭|今日穿搭|穿搭建议|日程|安排|今日安排|今日行程|今日计划|行程|计划)(?:\*\*|__)?\s*$"
-)
-_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    "outfit_style": (
-        "outfit_style",
-        "style",
-        "outfitstyle",
-        "穿搭风格",
-        "风格",
-        "服装风格",
-        "今日风格",
-    ),
-    "outfit": ("outfit", "穿搭", "今日穿搭", "穿搭建议", "穿着", "着装"),
-    "schedule": (
-        "schedule",
-        "日程",
-        "安排",
-        "今日安排",
-        "今日行程",
-        "今日计划",
-        "行程",
-        "计划",
-    ),
-}
-_GENERIC_AGENT_REPLY_MARKERS = (
-    "i'm ready to help",
-    "i am ready to help",
-    "available tools",
-    "取得进展的可用工具",
-    "我已准备好帮助完成任务",
-    "ready to help complete the task",
-)
+_KEY_VALUE_LINE_RE = re.compile(r"^\s*(outfit_style|outfit|schedule)\s*[:：]\s*(.*)$")
 
 
 @dataclass(slots=True)
@@ -98,8 +63,6 @@ class SchedulerGenerator:
             self._generating = True
 
         data: ScheduleData | None = None
-        ctx: ScheduleContext | None = None
-        content = ""
         date = date or datetime.datetime.now()
         date_str = date.strftime("%Y-%m-%d")
         try:
@@ -108,8 +71,6 @@ class SchedulerGenerator:
             prompt = self._build_prompt(ctx, extra)
             sid_base = f"life_scheduler_gen_{date_str}"
             content = await self._call_llm(prompt, sid=f"{sid_base}_0")
-            if self._looks_like_generic_agent_reply(content):
-                raise ValueError("模型返回了通用代理占位回复")
 
             # 这里先做宽松解析，再做风格约束校验，尽量兼容不稳定的模型输出。
             payload = self._extract_json_obj(content)
@@ -119,8 +80,6 @@ class SchedulerGenerator:
                     break
                 repair_prompt = self._build_style_repair_prompt(ctx, content, reason)
                 content = await self._call_llm(repair_prompt, sid=f"{sid_base}_{attempt}")
-                if self._looks_like_generic_agent_reply(content):
-                    raise ValueError("模型返回了通用代理占位回复")
                 payload = self._extract_json_obj(content)
                 ok, reason = self._validate_payload(payload, ctx)
 
@@ -134,19 +93,13 @@ class SchedulerGenerator:
             )
             return data
         except Exception as e:
-            preview = self._preview_text(content)
-            if preview:
-                logger.error(f"日程生成失败: {e} | 模型输出片段: {preview}")
-            else:
-                logger.error(f"日程生成失败: {e}")
-
-            fallback_ctx = ctx or self._build_default_context(date)
-            data = self._build_local_fallback_schedule(date_str, fallback_ctx)
-            logger.warning(
-                "已使用本地回退日程继续流程: %s",
-                json.dumps(asdict(data), ensure_ascii=False),
+            logger.error(f"日程生成失败: {e}")
+            return ScheduleData(
+                date=date_str,
+                outfit="生成失败",
+                schedule="生成失败",
+                status="failed",
             )
-            return data
         finally:
             async with self._gen_lock:
                 self._generating = False
@@ -178,20 +131,6 @@ class SchedulerGenerator:
             "星期六",
             "星期日",
         ][date.weekday()]
-
-    def _build_default_context(self, date: datetime.datetime) -> ScheduleContext:
-        return ScheduleContext(
-            date_str=date.strftime("%Y年%m月%d日"),
-            weekday=self._weekday(date),
-            holiday="",
-            persona_desc="你是一个热爱生活、情感细腻的 AI 伙伴。",
-            history_schedules="（无历史记录）",
-            recent_chats="无最近对话",
-            daily_theme="普通日常",
-            mood_color="轻松",
-            outfit_style="自然日常风",
-            schedule_type="轻松安排",
-        )
 
     def _get_holiday_info(self, date: datetime.date) -> str:
         try:
@@ -350,18 +289,10 @@ class SchedulerGenerator:
         if extra:
             prompt += f"\n\n【用户补充要求】\n请在生成日程时特别注意以下要求：{extra}"
 
-        prompt += (
-            "\n\n## 最终输出提醒\n"
-            "- 不要回复任何助手开场白、解释、道歉或英文占位文本。\n"
-            "- 如果拿不准细节，也必须直接输出一份合理、自然、贴近日常的 JSON。\n"
-            "- 绝对不要回复“我已准备好帮助完成任务”或类似句子。\n"
-            "- 如果你用了中文字段名，也必须只围绕“穿搭风格、穿搭、日程”这三项输出。\n"
-        )
-
         return prompt
 
     async def _call_llm(self, prompt: str, *, sid: str = "life_scheduler_gen") -> str:
-        provider = self.context.get_using_provider()
+        provider = self._get_provider(sid)
         if not provider:
             raise RuntimeError("No provider")
 
@@ -376,6 +307,25 @@ class SchedulerGenerator:
             raise RuntimeError("API 返回的 completion 为空")
         finally:
             await self._cleanup_session(sid)
+
+    def _get_provider(self, origin: str | None = None):
+        provider_id = str(self.config.get("schedule_provider_id") or "").strip()
+        if provider_id:
+            try:
+                provider = self.context.get_provider_by_id(provider_id)
+                logger.debug("[LifeScheduler] use configured provider: %s", provider_id)
+                return provider
+            except Exception as exc:
+                logger.warning(
+                    "[LifeScheduler] configured provider unavailable: %s error=%s",
+                    provider_id,
+                    exc,
+                )
+
+        try:
+            return self.context.get_using_provider(origin)
+        except TypeError:
+            return self.context.get_using_provider()
 
     @staticmethod
     def _extract_completion_text(resp: object) -> str:
@@ -425,14 +375,7 @@ class SchedulerGenerator:
             if payload:
                 return payload
 
-        for extractor in (
-            self._extract_structured_text_payload,
-            self._extract_key_value_payload,
-        ):
-            payload = extractor(text)
-            if payload:
-                return payload
-        return None
+        return self._extract_key_value_payload(text)
 
     def _collect_payload_candidates(self, text: str) -> list[str]:
         text = (text or "").strip()
@@ -500,15 +443,7 @@ class SchedulerGenerator:
             except Exception:
                 continue
             if isinstance(data, dict):
-                payload = self._coerce_payload(data)
-                if any(payload.values()):
-                    return payload
-                for nested_key in ("data", "result", "output", "content"):
-                    nested = data.get(nested_key)
-                    if isinstance(nested, dict):
-                        nested_payload = self._coerce_payload(nested)
-                        if any(nested_payload.values()):
-                            return nested_payload
+                return self._coerce_payload(data)
 
         return None
 
@@ -542,9 +477,7 @@ class SchedulerGenerator:
 
             match = _KEY_VALUE_LINE_RE.match(line)
             if match:
-                current_key = self._normalize_field_key(match.group(1))
-                if not current_key:
-                    continue
+                current_key = match.group(1)
                 data[current_key] = match.group(2).strip()
                 continue
 
@@ -559,76 +492,11 @@ class SchedulerGenerator:
 
         return self._coerce_payload(data)
 
-    def _extract_structured_text_payload(self, text: str) -> dict[str, str] | None:
-        text = (text or "").strip()
-        if not text:
-            return None
-
-        data: dict[str, str] = {}
-        current_key: str | None = None
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            heading = self._match_section_heading(line)
-            if heading:
-                current_key = heading
-                data.setdefault(current_key, "")
-                continue
-
-            match = _KEY_VALUE_LINE_RE.match(line)
-            if match:
-                current_key = self._normalize_field_key(match.group(1))
-                if not current_key:
-                    continue
-                data[current_key] = match.group(2).strip()
-                continue
-
-            if current_key:
-                cleaned = re.sub(r"^\s*(?:[-*•]\s*|\d+[.)、]\s*)", "", line).strip()
-                if not cleaned:
-                    continue
-                previous = data.get(current_key, "")
-                data[current_key] = (
-                    (previous + "\n" + cleaned).strip() if previous else cleaned
-                )
-
-        payload = self._coerce_payload(data)
-        if any(payload.values()):
-            return payload
-        return None
-
-    def _match_section_heading(self, line: str) -> str | None:
-        match = _SECTION_HEADING_RE.match(line)
-        if not match:
-            return None
-        return self._normalize_field_key(match.group(1))
-
-    def _normalize_field_key(self, key: str) -> str | None:
-        raw = re.sub(r"[\s_-]+", "", str(key or "")).strip().lower()
-        if not raw:
-            return None
-
-        for canonical, aliases in _FIELD_ALIASES.items():
-            for alias in aliases:
-                normalized_alias = re.sub(r"[\s_-]+", "", alias).strip().lower()
-                if raw == normalized_alias:
-                    return canonical
-        return None
-
     def _coerce_payload(self, data: dict[str, Any]) -> dict[str, str]:
-        normalized: dict[str, str] = {}
-        for key, value in data.items():
-            canonical = self._normalize_field_key(str(key))
-            if not canonical or value is None:
-                continue
-            normalized[canonical] = str(value).strip()
-
         return {
-            "outfit_style": normalized.get("outfit_style", ""),
-            "outfit": normalized.get("outfit", ""),
-            "schedule": normalized.get("schedule", ""),
+            "outfit_style": str(data.get("outfit_style", "")).strip(),
+            "outfit": str(data.get("outfit", "")).strip(),
+            "schedule": str(data.get("schedule", "")).strip(),
         }
 
     def _validate_payload(
@@ -651,21 +519,14 @@ class SchedulerGenerator:
             return True, ""
 
         model_style = str(payload.get("outfit_style", "")).strip()
-        if not model_style:
-            extracted_style = self._extract_style_from_outfit(outfit)
-            if extracted_style == required:
-                payload["outfit_style"] = required
-                model_style = required
-        if model_style and model_style != required:
+        if model_style != required:
             return False, f'outfit_style 必须严格等于 "{required}"'
-        if not model_style:
-            payload["outfit_style"] = required
 
         if not re.match(
             rf"^\s*(?:风格|【风格】|\[风格\])\s*[:：]\s*{re.escape(required)}(?:\s|$)",
             outfit,
         ):
-            payload["outfit"] = f"风格：{required}\n{outfit}"
+            return False, f'outfit 第一行必须以 "风格：{required}" 开头'
 
         return True, ""
 
@@ -684,48 +545,8 @@ class SchedulerGenerator:
             '输出 JSON 必须包含字段：outfit_style、outfit、schedule。\n'
             f'其中 outfit_style 必须严格等于 "{required}"，'
             f'outfit 第一行必须以 "风格：{required}" 开头。\n\n'
-            "不要回复任何助手开场白、分析过程或英文占位文本。\n"
-            "如果你使用中文字段名，也必须只使用“穿搭风格、穿搭、日程”。\n\n"
             "你之前的输出（供参考，可能不合规）：\n"
             f"{bad_text}\n"
-        )
-
-    def _looks_like_generic_agent_reply(self, text: str) -> bool:
-        lowered = (text or "").strip().lower()
-        if not lowered:
-            return False
-        return any(marker in lowered for marker in _GENERIC_AGENT_REPLY_MARKERS)
-
-    def _preview_text(self, text: str, limit: int = 160) -> str:
-        raw = re.sub(r"\s+", " ", (text or "").strip())
-        if not raw:
-            return ""
-        return raw[:limit]
-
-    def _build_local_fallback_schedule(
-        self, date_str: str, ctx: ScheduleContext
-    ) -> ScheduleData:
-        outfit_style = (ctx.outfit_style or "").strip() or "日常休闲风"
-        mood = (ctx.mood_color or "").strip() or "轻松"
-        theme = (ctx.daily_theme or "").strip() or "普通日常"
-        schedule_type = (ctx.schedule_type or "").replace("型", "").strip() or "轻松安排"
-
-        outfit = (
-            f"风格：{outfit_style}\n"
-            f"今天走 {outfit_style} 路线，整体以 {mood}、干净、自然为主。"
-            "上身选择舒适耐看的基础款，下身搭配利落好活动的单品，"
-            "鞋袜和小配饰保持轻便，不做夸张堆叠。"
-        )
-        schedule = (
-            f"今天以{schedule_type}为主，围绕“{theme}”慢慢推进。"
-            f"先处理手头正事，再留一点时间给休息、整理或随手记录，整体节奏保持{mood}，不过度安排。"
-        )
-        return ScheduleData(
-            date=date_str,
-            outfit_style=outfit_style,
-            outfit=outfit,
-            schedule=schedule,
-            status="ok",
         )
 
     def _to_schedule_data(
