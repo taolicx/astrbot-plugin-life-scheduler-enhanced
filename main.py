@@ -98,10 +98,9 @@ class LifeSchedulerPlugin(Star):
         try:
             metadata = star_registry.get(self.__class__.__name__)
             live_schema = metadata.config.schema if metadata and metadata.config else None
-            if isinstance(live_schema, dict):
-                live_field = live_schema.get("schedule_provider_id")
-                if isinstance(live_field, dict) and live_field.get("options") != provider_ids:
-                    live_field["options"] = list(provider_ids)
+            live_field = self._find_schema_field(live_schema, "schedule_provider_id")
+            if isinstance(live_field, dict) and live_field.get("options") != provider_ids:
+                live_field["options"] = list(provider_ids)
         except Exception as exc:
             logger.warning("[LifeScheduler] update live schema provider options failed: %s", exc)
 
@@ -110,6 +109,26 @@ class LifeSchedulerPlugin(Star):
             len(provider_ids) - 1,
             "runtime" if providers else "cmd_config",
         )
+
+    def _find_schema_field(self, schema: object, field_name: str) -> dict | None:
+        if isinstance(schema, dict):
+            direct = schema.get(field_name)
+            if isinstance(direct, dict):
+                return direct
+            for key in ("items", "properties", "fields"):
+                nested = schema.get(key)
+                found = self._find_schema_field(nested, field_name)
+                if found:
+                    return found
+            return None
+
+        if isinstance(schema, list):
+            for item in schema:
+                found = self._find_schema_field(item, field_name)
+                if found:
+                    return found
+
+        return None
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
