@@ -1,29 +1,20 @@
 import datetime
+import json
 import re
+from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.all import Context, Star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.message.components import Plain
 from astrbot.core.provider.entities import ProviderRequest
+from astrbot.core.star.star import StarMetadata, star_registry
 from astrbot.core.star.star_tools import StarTools
 
 from .data import ScheduleDataManager
 from .generator import SchedulerGenerator
 from .schedule import LifeScheduler
 from .utils import time_desc
-
-_GENERIC_AGENT_REPLY_PATTERNS = (
-    re.compile(
-        r"^\s*i(?:'m| am)\s+ready\s+to\s+help.*?available\s+tools.*$",
-        re.IGNORECASE | re.DOTALL,
-    ),
-    re.compile(
-        r"^\s*我已准备好帮助完成任务.*?(?:取得进展的可用工具|available tools).*$",
-        re.IGNORECASE | re.DOTALL,
-    ),
-)
 
 
 class LifeSchedulerPlugin(Star):
@@ -33,8 +24,13 @@ class LifeSchedulerPlugin(Star):
         self.config = config
         self.data_dir = StarTools.get_data_dir()
         self.schedule_data_file = self.data_dir / "schedule_data.json"
+        plugins_dir = Path(__file__).resolve().parent.parent
+        self.astrbot_data_dir = plugins_dir.parent
+        self.config_dir = self.astrbot_data_dir / "config"
+        self.schema_path = Path(__file__).with_name("_conf_schema.json")
 
     async def initialize(self):
+        self._refresh_provider_schema_options()
         self.data_mgr = ScheduleDataManager(self.schedule_data_file)
         self.generator = SchedulerGenerator(self.context, self.config, self.data_mgr)
         self.scheduler = LifeScheduler(
@@ -47,6 +43,73 @@ class LifeSchedulerPlugin(Star):
     async def terminate(self):
         """插件卸载时清理"""
         self.scheduler.stop()
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self):
+        self._refresh_provider_schema_options()
+
+    @filter.on_plugin_loaded()
+    async def on_plugin_loaded(self, metadata: StarMetadata):
+        self._refresh_provider_schema_options()
+
+    def _refresh_provider_schema_options(self) -> None:
+        provider_ids: list[str] = [""]
+        providers = getattr(getattr(self.context, "provider_manager", None), "providers", None)
+        if providers:
+            for provider in providers:
+                provider_id = str(getattr(provider, "id", "") or "").strip()
+                if provider_id and provider_id not in provider_ids:
+                    provider_ids.append(provider_id)
+
+        if len(provider_ids) == 1:
+            cmd_config_path = self.astrbot_data_dir / "cmd_config.json"
+            try:
+                cmd_config = json.loads(cmd_config_path.read_text(encoding="utf-8-sig"))
+            except Exception as exc:
+                logger.warning("[LifeScheduler] load cmd_config for schema refresh failed: %s", exc)
+                cmd_config = {}
+            for provider_cfg in cmd_config.get("provider", []) or []:
+                provider_id = str(provider_cfg.get("id") or "").strip()
+                if provider_id and provider_id not in provider_ids:
+                    provider_ids.append(provider_id)
+
+        try:
+            schema = json.loads(self.schema_path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            logger.warning("[LifeScheduler] load schema for provider refresh failed: %s", exc)
+            return
+
+        field = schema.get("schedule_provider_id")
+        if not isinstance(field, dict):
+            return
+
+        schema_changed = field.get("options") != provider_ids
+        if schema_changed:
+            field["options"] = provider_ids
+            field["default"] = field.get("default", "")
+            try:
+                self.schema_path.write_text(
+                    json.dumps(schema, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                logger.warning("[LifeScheduler] write schema provider options failed: %s", exc)
+
+        try:
+            metadata = star_registry.get(self.__class__.__name__)
+            live_schema = metadata.config.schema if metadata and metadata.config else None
+            if isinstance(live_schema, dict):
+                live_field = live_schema.get("schedule_provider_id")
+                if isinstance(live_field, dict) and live_field.get("options") != provider_ids:
+                    live_field["options"] = list(provider_ids)
+        except Exception as exc:
+            logger.warning("[LifeScheduler] update live schema provider options failed: %s", exc)
+
+        logger.info(
+            "[LifeScheduler] refreshed provider options: count=%s source=%s",
+            len(provider_ids) - 1,
+            "runtime" if providers else "cmd_config",
+        )
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -72,45 +135,6 @@ class LifeSchedulerPlugin(Star):
 
         req.system_prompt += inject_text
         logger.debug(f"[LLM] 添加的内在状态注入：{inject_text}")
-
-    @filter.on_decorating_result()
-    async def on_decorating_result(self, event: AstrMessageEvent):
-        """普通聊天结果发出前清洗通用代理占位废话。"""
-        result = event.get_result()
-        if result is None or not result.chain or not result.is_model_result():
-            return
-
-        changed = False
-        for comp in result.chain:
-            if not isinstance(comp, Plain):
-                continue
-            sanitized = self._sanitize_generic_agent_reply(comp.text)
-            if sanitized != comp.text:
-                comp.text = sanitized
-                changed = True
-
-        if changed:
-            logger.warning("已清洗模型通用代理占位回复")
-
-    def _sanitize_generic_agent_reply(self, text: str) -> str:
-        raw = text or ""
-        compact = re.sub(r"\s+", " ", raw).strip()
-        if not compact:
-            return raw
-
-        for pattern in _GENERIC_AGENT_REPLY_PATTERNS:
-            if pattern.match(compact):
-                return "刚刚模型回复异常，请把上一句再发一次。"
-
-        for marker in ("I'm ready to help", "I am ready to help", "我已准备好帮助完成任务"):
-            if compact.startswith(marker):
-                parts = re.split(r"[。.!！？\n]+", compact, maxsplit=1)
-                if len(parts) > 1 and parts[1].strip():
-                    remainder = parts[1].strip(" ，。；;:：")
-                    return remainder or "刚刚模型回复异常，请把上一句再发一次。"
-                return "刚刚模型回复异常，请把上一句再发一次。"
-
-        return raw
 
     @filter.command("查看日程", alias={"life show"})
     async def life_show(self, event: AstrMessageEvent):
