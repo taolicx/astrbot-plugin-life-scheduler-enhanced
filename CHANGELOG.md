@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.3
+
+- 修复不同 AstrBot 版本下 `metadata.config` 结构不一致时，实时刷新 `schedule_provider_id` 下拉会把 `list` 当成 `dict` 处理并持续打 warning 的问题
+- live schema 刷新改为防御式解析：兼容对象、dict、list 以及带 `schema` 属性的配置对象
+
 ## v2.4.2
 
 - 修复分时段分支里 `generator.py` 使用 `@compat_dataclass` 时，辅助函数定义顺序错误导致导入阶段直接 `NameError`
