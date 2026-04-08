@@ -17,19 +17,33 @@ _STYLE_PREFIX_RE = re.compile(
     r"^\s*(?:风格|【风格】|\[风格\])\s*[:：]\s*(?P<style>.+?)(?:\n|$)"
 )
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
-_KEY_VALUE_LINE_RE = re.compile(r"^\s*(outfit_style|outfit|schedule)\s*[:：]\s*(.*)$")
-
-# 重新定义这几个常量，兼容中文字段名和通用助手废话输出。
-_STYLE_PREFIX_RE = re.compile(
-    r"^\s*(?:风格|【风格】|\[风格\])\s*[:：]\s*(?P<style>.+?)(?:\n|$)"
-)
 _KEY_VALUE_LINE_RE = re.compile(
-    r"^\s*(outfit_style|outfit|schedule|style|穿搭风格|风格|穿搭|日程|安排|今日安排)\s*[:：]\s*(.*)$"
+    r"^\s*(?:[-*•]\s*)?(?:\*\*|__)?(outfit_style|outfit|schedule|style|穿搭风格|风格|穿搭|今日穿搭|穿搭建议|日程|安排|今日安排|今日行程|今日计划|行程|计划)(?:\*\*|__)?\s*[:：]\s*(.*)$"
+)
+_SECTION_HEADING_RE = re.compile(
+    r"^\s*(?:[#>]+\s*|[-*•]\s*)?(?:\*\*|__)?(outfit_style|outfit|schedule|style|穿搭风格|风格|穿搭|今日穿搭|穿搭建议|日程|安排|今日安排|今日行程|今日计划|行程|计划)(?:\*\*|__)?\s*$"
 )
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    "outfit_style": ("outfit_style", "style", "outfitstyle", "穿搭风格", "风格", "服装风格"),
-    "outfit": ("outfit", "穿搭", "今日穿搭", "穿着", "着装"),
-    "schedule": ("schedule", "日程", "安排", "今日安排", "今日行程", "行程"),
+    "outfit_style": (
+        "outfit_style",
+        "style",
+        "outfitstyle",
+        "穿搭风格",
+        "风格",
+        "服装风格",
+        "今日风格",
+    ),
+    "outfit": ("outfit", "穿搭", "今日穿搭", "穿搭建议", "穿着", "着装"),
+    "schedule": (
+        "schedule",
+        "日程",
+        "安排",
+        "今日安排",
+        "今日行程",
+        "今日计划",
+        "行程",
+        "计划",
+    ),
 }
 _GENERIC_AGENT_REPLY_MARKERS = (
     "i'm ready to help",
@@ -126,20 +140,13 @@ class SchedulerGenerator:
             else:
                 logger.error(f"日程生成失败: {e}")
 
-            if ctx is not None:
-                data = self._build_local_fallback_schedule(date_str, ctx)
-                logger.warning(
-                    "已使用本地回退日程继续流程: %s",
-                    json.dumps(asdict(data), ensure_ascii=False),
-                )
-                return data
-
-            return ScheduleData(
-                date=date_str,
-                outfit="生成失败",
-                schedule="生成失败",
-                status="failed",
+            fallback_ctx = ctx or self._build_default_context(date)
+            data = self._build_local_fallback_schedule(date_str, fallback_ctx)
+            logger.warning(
+                "已使用本地回退日程继续流程: %s",
+                json.dumps(asdict(data), ensure_ascii=False),
             )
+            return data
         finally:
             async with self._gen_lock:
                 self._generating = False
@@ -171,6 +178,20 @@ class SchedulerGenerator:
             "星期六",
             "星期日",
         ][date.weekday()]
+
+    def _build_default_context(self, date: datetime.datetime) -> ScheduleContext:
+        return ScheduleContext(
+            date_str=date.strftime("%Y年%m月%d日"),
+            weekday=self._weekday(date),
+            holiday="",
+            persona_desc="你是一个热爱生活、情感细腻的 AI 伙伴。",
+            history_schedules="（无历史记录）",
+            recent_chats="无最近对话",
+            daily_theme="普通日常",
+            mood_color="轻松",
+            outfit_style="自然日常风",
+            schedule_type="轻松安排",
+        )
 
     def _get_holiday_info(self, date: datetime.date) -> str:
         try:
@@ -404,7 +425,14 @@ class SchedulerGenerator:
             if payload:
                 return payload
 
-        return self._extract_key_value_payload(text)
+        for extractor in (
+            self._extract_structured_text_payload,
+            self._extract_key_value_payload,
+        ):
+            payload = extractor(text)
+            if payload:
+                return payload
+        return None
 
     def _collect_payload_candidates(self, text: str) -> list[str]:
         text = (text or "").strip()
@@ -472,7 +500,15 @@ class SchedulerGenerator:
             except Exception:
                 continue
             if isinstance(data, dict):
-                return self._coerce_payload(data)
+                payload = self._coerce_payload(data)
+                if any(payload.values()):
+                    return payload
+                for nested_key in ("data", "result", "output", "content"):
+                    nested = data.get(nested_key)
+                    if isinstance(nested, dict):
+                        nested_payload = self._coerce_payload(nested)
+                        if any(nested_payload.values()):
+                            return nested_payload
 
         return None
 
@@ -523,6 +559,52 @@ class SchedulerGenerator:
 
         return self._coerce_payload(data)
 
+    def _extract_structured_text_payload(self, text: str) -> dict[str, str] | None:
+        text = (text or "").strip()
+        if not text:
+            return None
+
+        data: dict[str, str] = {}
+        current_key: str | None = None
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            heading = self._match_section_heading(line)
+            if heading:
+                current_key = heading
+                data.setdefault(current_key, "")
+                continue
+
+            match = _KEY_VALUE_LINE_RE.match(line)
+            if match:
+                current_key = self._normalize_field_key(match.group(1))
+                if not current_key:
+                    continue
+                data[current_key] = match.group(2).strip()
+                continue
+
+            if current_key:
+                cleaned = re.sub(r"^\s*(?:[-*•]\s*|\d+[.)、]\s*)", "", line).strip()
+                if not cleaned:
+                    continue
+                previous = data.get(current_key, "")
+                data[current_key] = (
+                    (previous + "\n" + cleaned).strip() if previous else cleaned
+                )
+
+        payload = self._coerce_payload(data)
+        if any(payload.values()):
+            return payload
+        return None
+
+    def _match_section_heading(self, line: str) -> str | None:
+        match = _SECTION_HEADING_RE.match(line)
+        if not match:
+            return None
+        return self._normalize_field_key(match.group(1))
+
     def _normalize_field_key(self, key: str) -> str | None:
         raw = re.sub(r"[\s_-]+", "", str(key or "")).strip().lower()
         if not raw:
@@ -569,14 +651,21 @@ class SchedulerGenerator:
             return True, ""
 
         model_style = str(payload.get("outfit_style", "")).strip()
-        if model_style != required:
+        if not model_style:
+            extracted_style = self._extract_style_from_outfit(outfit)
+            if extracted_style == required:
+                payload["outfit_style"] = required
+                model_style = required
+        if model_style and model_style != required:
             return False, f'outfit_style 必须严格等于 "{required}"'
+        if not model_style:
+            payload["outfit_style"] = required
 
         if not re.match(
             rf"^\s*(?:风格|【风格】|\[风格\])\s*[:：]\s*{re.escape(required)}(?:\s|$)",
             outfit,
         ):
-            return False, f'outfit 第一行必须以 "风格：{required}" 开头'
+            payload["outfit"] = f"风格：{required}\n{outfit}"
 
         return True, ""
 
