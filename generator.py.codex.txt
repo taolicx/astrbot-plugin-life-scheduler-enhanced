@@ -1,6 +1,7 @@
 文件作用
 - 负责把聊天模型输出转换成“固定 24 小时窗口 + 6 段分时段日程”。
 - 当前版本已经去掉“模型必须返回完整 JSON”的硬依赖。
+- 当前版本会主动打出 `schedule generation mode=no_json_guidance`，用于确认云端实际跑到这条新主链。
 
 主流程
 - `generate_schedule()`
