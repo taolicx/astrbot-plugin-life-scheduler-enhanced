@@ -1,0 +1,52 @@
+作用概览
+- 这是 `astrbot_plugin_life_scheduler_enhanced` 的分支工作版。
+- 当前分支围绕“按刷新锚点固定 24 小时窗口 + 六段分时段细节 + 供自拍联动直接消费”来工作。
+
+当前版本重点
+- 版本号：`v2.4.4`
+- `schedule_time` 决定每天的固定刷新锚点；从这个时刻起算 24 小时，窗口内日程固定不变。
+- 每天不是只生成一句穿搭和一句安排，而是拆成 6 段：
+  - `wake_up`
+  - `morning_outing`
+  - `daytime_work`
+  - `after_work`
+  - `home_evening`
+  - `late_night`
+- 每段除了 `outfit/activity/location/mood/selfie_scene` 外，还补充：
+  - `outfit_top`
+  - `outfit_bottom`
+  - `outfit_outerwear`
+  - `outfit_shoes`
+  - `outfit_accessories`
+  - `hairstyle`
+  - `makeup`
+  - `selfie_pose`
+  - `selfie_lighting`
+
+关键文件
+- `data.py`
+  - 定义 `ScheduleSegment`、`ScheduleData` 与 `ScheduleDataManager`
+  - 负责固定窗口归属、旧数据补齐、分时段默认细节
+- `generator.py`
+  - 当前核心改动文件
+  - 已去掉“模型必须返回 JSON”的硬依赖
+  - 改成“模型给少量文本线索，代码本地组装完整日程”
+- `main.py`
+  - 命令入口、系统提示注入、配置页 provider 下拉刷新
+- `schedule.py`
+  - 每日到点调度生成
+
+执行流
+- 到达 `schedule_time` 时，`schedule.py` 调 `generator.generate_schedule()`
+- `generator.py` 生成当前固定窗口的一整套日程
+- `data.py` 负责保存并按窗口读取
+- 下游自拍联动插件读取当前时段内容做改图和说说文案
+
+这次的关键修正
+- 主链不再要求 LLM 一次性吐出完整 JSON
+- 模型返回空文本、英文占位废话或自然语言时，也会生成 `status=ok` 的本地日程
+- 这样 Claude / GLM / Gemini 这类更爱说人话的模型也能稳定驱动日程生成
+
+排错提示
+- 如果云端还报旧的 `compat_dataclass` 或 JSON 解析错误，优先怀疑安装器镜像缓存到了旧 zip。
+- 如果分时段不切换，优先看 `resolve_cycle_anchor()` 和 `ScheduleData.active_segment()`
