@@ -26,6 +26,15 @@
     },
     "default": 10
   },
+  "schedule_provider_id": {
+    "description": "日程生成使用的聊天模型",
+    "hint": "留空时跟随当前会话模型。插件启动后会自动把当前已配置的聊天 provider 刷到下拉里。",
+    "type": "string",
+    "options": [
+      ""
+    ],
+    "default": ""
+  },
   "pool": {
     "description": "创意池",
     "hint": "每次生成日程时，各个池会随机选择一个来并入日程生成提示词",

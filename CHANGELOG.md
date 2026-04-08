@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.3.6
+
+- 主线版本改为支持自定义选择日程生成所使用的聊天模型
+- 新增 `schedule_provider_id` 配置，留空时继续跟随当前会话模型
+- 插件启动后会自动刷新已配置的 provider 下拉选项，便于在配置页直接选择模型
+
 ## v2.3.2
 
 - 增强日程生成阶段的 JSON 容错解析，兼容 fenced code block、伪 JSON、平衡花括号片段和 key-value 文本输出

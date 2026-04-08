@@ -292,7 +292,7 @@ class SchedulerGenerator:
         return prompt
 
     async def _call_llm(self, prompt: str, *, sid: str = "life_scheduler_gen") -> str:
-        provider = self.context.get_using_provider()
+        provider = self._get_provider(sid)
         if not provider:
             raise RuntimeError("No provider")
 
@@ -307,6 +307,25 @@ class SchedulerGenerator:
             raise RuntimeError("API 返回的 completion 为空")
         finally:
             await self._cleanup_session(sid)
+
+    def _get_provider(self, origin: str | None = None):
+        provider_id = str(self.config.get("schedule_provider_id") or "").strip()
+        if provider_id:
+            try:
+                provider = self.context.get_provider_by_id(provider_id)
+                logger.debug("[LifeScheduler] use configured provider: %s", provider_id)
+                return provider
+            except Exception as exc:
+                logger.warning(
+                    "[LifeScheduler] configured provider unavailable: %s error=%s",
+                    provider_id,
+                    exc,
+                )
+
+        try:
+            return self.context.get_using_provider(origin)
+        except TypeError:
+            return self.context.get_using_provider()
 
     @staticmethod
     def _extract_completion_text(resp: object) -> str:
