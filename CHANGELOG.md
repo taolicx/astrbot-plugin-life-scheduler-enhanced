@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.3.2
+
+- 增强日程生成阶段的 JSON 容错解析，兼容 fenced code block、伪 JSON、平衡花括号片段和 key-value 文本输出
+- 保留穿搭风格校验与修正重试逻辑，降低模型不按纯 JSON 输出时直接失败的概率
+- 优化失败兜底文案，使生成异常时的穿搭与日程占位内容更自然
+
 ## v2.3.1
 
 - 新增根目录兼容模块 `data.py`、`generator.py`、`schedule.py`、`utils.py`
