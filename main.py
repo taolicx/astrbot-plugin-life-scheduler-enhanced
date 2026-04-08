@@ -115,7 +115,9 @@ class LifeSchedulerPlugin(Star):
 
         try:
             metadata = star_registry.get(self.__class__.__name__)
-            live_schema = metadata.config.schema if metadata and metadata.config else None
+            live_schema = self._extract_live_schema(
+                getattr(metadata, "config", None) if metadata else None
+            )
             live_field = self._find_schema_field(live_schema, "schedule_provider_id")
             if isinstance(live_field, dict) and live_field.get("options") != provider_ids:
                 live_field["options"] = list(provider_ids)
@@ -134,8 +136,31 @@ class LifeSchedulerPlugin(Star):
     def _current_anchor_time(self) -> str:
         return str(self.config.get("schedule_time") or "07:00")
 
+    def _extract_live_schema(self, config_obj: object) -> object:
+        """兼容不同 AstrBot 版本的 metadata.config 结构。"""
+        if config_obj is None:
+            return None
+        if isinstance(config_obj, dict):
+            return config_obj.get("schema", config_obj)
+        if isinstance(config_obj, list):
+            return config_obj
+        schema = getattr(config_obj, "schema", None)
+        if schema is not None:
+            return schema
+        return config_obj
+
     def _find_schema_field(self, schema: object, field_name: str) -> dict | None:
-        if isinstance(schema, dict):
+        if schema is None:
+            return None
+
+        if isinstance(schema, list):
+            for item in schema:
+                found = self._find_schema_field(item, field_name)
+                if found:
+                    return found
+            return None
+
+        if hasattr(schema, "get") and callable(getattr(schema, "get")):
             direct = schema.get(field_name)
             if isinstance(direct, dict):
                 return direct
@@ -146,11 +171,9 @@ class LifeSchedulerPlugin(Star):
                     return found
             return None
 
-        if isinstance(schema, list):
-            for item in schema:
-                found = self._find_schema_field(item, field_name)
-                if found:
-                    return found
+        nested_schema = getattr(schema, "schema", None)
+        if nested_schema is not None and nested_schema is not schema:
+            return self._find_schema_field(nested_schema, field_name)
 
         return None
 
