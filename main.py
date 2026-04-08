@@ -122,8 +122,10 @@ class LifeSchedulerPlugin(Star):
             if isinstance(live_field, dict) and live_field.get("options") != provider_ids:
                 live_field["options"] = list(provider_ids)
         except Exception as exc:
-            logger.warning(
-                "[LifeScheduler] update live schema provider options failed: %s",
+            # 旧版 AstrBot 的 live schema 结构不稳定，这里只影响配置页实时刷新，
+            # 不应该污染运行日志，更不能影响主流程。
+            logger.debug(
+                "[LifeScheduler] skip live schema provider refresh due to incompatible runtime schema: %s",
                 exc,
             )
 
