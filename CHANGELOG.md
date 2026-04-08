@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.5
+
+- 屏蔽旧版 AstrBot live schema 结构不兼容导致的 provider 刷新 warning，不再污染运行日志。
+- 增加 `schedule generation mode=no_json_guidance` 明确日志，便于确认云端实际跑到的是“无 JSON 依赖”主链。
+
 ## v2.4.4
 
 - 重写 `generator.py` 主生成链，不再要求模型直接输出完整 JSON 结构。
