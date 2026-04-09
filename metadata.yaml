@@ -1,6 +1,6 @@
 name: astrbot_plugin_life_scheduler_enhanced
 display_name: 拟人化生活日程增强版
-desc: "为 Bot 生成更稳定、更贴近日常、支持固定窗口与分时段细节的生活日程。"
-version: v2.4.5
+desc: "为 Bot 生成更稳定、更贴近日常、偏青春少女向、支持固定窗口与分时段细节的生活日程。"
+version: v2.4.6
 author: taolicx
 repo: "https://github.com/taolicx/astrbot-plugin-life-scheduler-enhanced"
