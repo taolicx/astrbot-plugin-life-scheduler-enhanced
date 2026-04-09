@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.7
+
+- 修复 `_conf_schema.json` 被 Windows PowerShell 以带 BOM 的 UTF-8 写回后，AstrBot 安装时 `json.loads` 直接报错的问题。
+- 重新输出为无 BOM 的 UTF-8 JSON，保证 GitHub 分支安装时可被 AstrBot 直接读取。
+
 ## v2.4.6
 
 - 将四组创意池统一扩充到 100 条，并整体改成更偏青春少女、清爽轻盈、真实日常的词条。
