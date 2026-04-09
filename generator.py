@@ -230,7 +230,9 @@ class SchedulerGenerator:
             "整体气质: ...\n\n"
             "要求：\n"
             "- 内容必须贴近日常、真实、自然、能落地。\n"
-            "- 穿搭不要夸张，不要二次元，不要玄幻。\n"
+            "- 穿搭和妆造优先表现青春少女感、年轻感、清爽感、轻盈感。\n"
+            "- 不要显老，不要轻熟，不要姨感，不要妈妈感，不要浓妆艳抹，不要成熟职场照。\n"
+            "- 穿搭不要夸张，不要二次元，不要玄幻，但可以是清甜、通学、休闲、轻薄居家一类真实少女日常。\n"
             "- 日程要像普通人一天内会发生的安排。\n"
             "- 自拍氛围要像生活里顺手拍的照片。\n"
             "- 不要输出英文模板，不要输出多余前言。\n\n"
@@ -364,12 +366,12 @@ class SchedulerGenerator:
             ),
         )
         guidance = DayGuidance(
-            daily_hook="今天按自己的节奏慢慢推进手头的事，保持真实、自然、可持续的一天。",
-            outfit_focus="穿搭以舒适、利落、方便全天切换场景为主。",
+            daily_hook="今天按轻松又真实的少女日常节奏慢慢推进手头的事，保持自然、清爽、可持续的一天。",
+            outfit_focus="穿搭以年轻、清爽、轻盈、显精神为主，优先像普通青春女生的真实日常穿搭。",
             daytime_focus="白天把主要精力放在工作、学习或必要外出。",
             evening_focus="晚上逐步收尾，把状态切回更放松的居家节奏。",
-            selfie_tone="像日常生活里顺手拍到的真实状态照。",
-            vibe=safe_ctx.mood_color or "平静",
+            selfie_tone="像日常生活里顺手拍到的真实少女感自拍，清透自然，不要显老。",
+            vibe=safe_ctx.mood_color or "清透松弛",
         )
         return self._build_schedule_from_guidance(anchor_dt, safe_ctx, guidance, extra=extra)
 
