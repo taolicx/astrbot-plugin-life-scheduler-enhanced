@@ -6,8 +6,8 @@
 
 ## 增强内容
 
-- 扩充创意池为更贴近日常的真实内容
-- 优化穿搭风格与日程类型的可用性
+- 扩充创意池为更贴近日常、偏青春少女感的真实内容
+- 优化穿搭风格与日程类型的可用性与年轻感
 - 降低空泛、悬浮、难落地词条对生成结果的干扰
 - 保留原有自动生成、查看、重写、注入能力
 
@@ -49,7 +49,7 @@ pip install holidays APScheduler
 | `reference_history_days` | int | `3` | 生成时参考的历史日程天数 |
 | `reference_recent_count` | int | `10` | 生成时参考的近期会话条数，设为 `0` 表示不参考 |
 | `pool` | object | - | 创意池，每次生成随机抽取 |
-| `prompt_template` | text | - | LLM 生成日程的 Prompt 模板 |
+| `prompt_template` | text | - | LLM 生成 6 行生活线索的 Prompt 模板 |
 
 ## 创意池
 
@@ -60,7 +60,7 @@ pip install holidays APScheduler
 - `outfit_styles`
 - `schedule_types`
 
-每组均已扩充为 50 条，更偏真实生活、日常场景、稳定可用的生成约束。
+每组均已扩充为 100 条，更偏青春少女、清爽轻盈、真实生活、稳定可用的生成约束。
 
 ## Prompt 占位符
 
@@ -89,5 +89,5 @@ pip install holidays APScheduler
 
 ## 说明
 
-- 本仓库为增强整理版，重点放在“更真实的创意池”和“更稳定的生活感生成”。
+- 本仓库为增强整理版，重点放在“更真实的创意池”“更稳定的生活感生成”和“更自然的青春少女感”。
 - 如果你还在继续扩池，建议优先保持真实、具体、可执行，避免加入太抽象或无实际作用的词条。
